@@ -13,8 +13,12 @@ import {
   parseAuthenticatedHosts,
   parseGitlabRemote,
   parseProjectRef,
+  parseGitlabCliArgs,
+  parseGitlabTarget,
+  tailJobLog,
   toItems,
   validateGitlabCliArgs,
+  DEFAULT_JOB_LOG_LINES,
   type GitlabHost,
 } from "./server";
 
@@ -198,8 +202,208 @@ describe("glab plumbing", () => {
     expect(
       validateGitlabCliArgs(["mrs", "gitlab.com/group/app", "extra"]),
     ).toContain("Unexpected argument");
-    expect(validateGitlabCliArgs(["projects", "--json"])).toContain(
+    expect(validateGitlabCliArgs(["projects", "extra"])).toContain(
       "does not accept arguments",
+    );
+    expect(validateGitlabCliArgs(["projects", "--json"])).toBeNull();
+    expect(validateGitlabCliArgs(["issues", "--bogus"])).toContain(
+      'Unknown flag "--bogus"',
+    );
+  });
+});
+
+describe("bb gitlab argument parsing", () => {
+  it("parses list filters, with repeatable labels and both flag forms", () => {
+    expect(
+      parseGitlabCliArgs([
+        "mrs",
+        "gitlab.com/group/app",
+        "--state=merged",
+        "--author",
+        "@me",
+        "--label",
+        "bug",
+        "--label=needs review",
+        "--draft",
+        "--limit",
+        "5",
+        "--json",
+      ]),
+    ).toEqual({
+      sub: "mrs",
+      project: "gitlab.com/group/app",
+      filters: {
+        state: "merged",
+        mine: false,
+        author: "@me",
+        assignee: null,
+        labels: ["bug", "needs review"],
+        draft: true,
+        limit: 5,
+        json: true,
+      },
+    });
+    expect(parseGitlabCliArgs(["issues"])).toMatchObject({
+      sub: "issues",
+      project: null,
+      filters: { state: "open", mine: false, labels: [] },
+    });
+  });
+
+  it("rejects list filters that cannot mean anything", () => {
+    expect(parseGitlabCliArgs(["issues", "--state", "merged"])).toEqual({
+      error: "Issues are never merged; use --state closed.",
+    });
+    expect(parseGitlabCliArgs(["issues", "--draft"])).toEqual({
+      error: 'Unknown flag "--draft".',
+    });
+    expect(parseGitlabCliArgs(["mrs", "--state", "weird"])).toHaveProperty(
+      "error",
+    );
+    expect(parseGitlabCliArgs(["mrs", "--limit", "0"])).toHaveProperty("error");
+    expect(parseGitlabCliArgs(["mrs", "--mine", "--assignee", "dana"])).toHaveProperty(
+      "error",
+    );
+    expect(parseGitlabCliArgs(["mrs", "--author"])).toEqual({
+      error: "Flag --author needs a value.",
+    });
+    expect(parseGitlabCliArgs(["mrs", "--state", "open", "--state", "all"])).toEqual({
+      error: "Flag --state given twice.",
+    });
+  });
+
+  it("keeps comment text verbatim, flags and all", () => {
+    expect(
+      parseGitlabCliArgs(["comment", "gitlab.com/g/app!12", "LGTM,", "--but", "see", "#3"]),
+    ).toEqual({
+      sub: "comment",
+      target: "gitlab.com/g/app!12",
+      body: "LGTM, --but see #3",
+    });
+    expect(parseGitlabCliArgs(["comment", "gitlab.com/g/app!12"])).toHaveProperty(
+      "error",
+    );
+  });
+
+  it("parses pipeline, retry, and run selectors", () => {
+    expect(parseGitlabCliArgs(["pipeline"])).toEqual({
+      sub: "pipeline",
+      target: null,
+      ref: null,
+      pipelineId: null,
+      logs: DEFAULT_JOB_LOG_LINES,
+      json: false,
+    });
+    expect(
+      parseGitlabCliArgs(["pipeline", "gitlab.com/g/app", "--ref", "main", "--logs", "0"]),
+    ).toMatchObject({ target: "gitlab.com/g/app", ref: "main", logs: 0 });
+    expect(
+      parseGitlabCliArgs(["retry", "gitlab.com/g/app!4", "--job", "unit tests"]),
+    ).toEqual({
+      sub: "retry",
+      target: "gitlab.com/g/app!4",
+      ref: null,
+      pipelineId: null,
+      job: "unit tests",
+    });
+    expect(
+      parseGitlabCliArgs(["retry", "--pipeline", "9", "--ref", "main"]),
+    ).toEqual({ error: "Pass --pipeline or --ref, not both." });
+    expect(parseGitlabCliArgs(["pipeline", "--pipeline", "abc"])).toHaveProperty(
+      "error",
+    );
+    expect(parseGitlabCliArgs(["run", "--ref", "release"])).toEqual({
+      sub: "run",
+      target: null,
+      ref: "release",
+    });
+    expect(parseGitlabCliArgs(["show"])).toHaveProperty("error");
+    expect(parseGitlabCliArgs(["deploy"])).toEqual({
+      error: 'Unknown subcommand "deploy".',
+    });
+  });
+});
+
+describe("bb gitlab targets", () => {
+  it("reads host-qualified issue and merge-request refs", () => {
+    expect(parseGitlabTarget("gitlab.com/group/sub/app#7", HOSTS, "gitlab.com")).toEqual({
+      kind: "issue",
+      project: "gitlab.com/group/sub/app",
+      iid: 7,
+    });
+    expect(parseGitlabTarget("gitlab.com/group/app!12", HOSTS, "gitlab.com")).toEqual({
+      kind: "mr",
+      project: "gitlab.com/group/app",
+      iid: 12,
+    });
+    expect(parseGitlabTarget("gitlab.com/group/app", HOSTS, "gitlab.com")).toEqual({
+      kind: "project",
+      project: "gitlab.com/group/app",
+    });
+    expect(parseGitlabTarget("gitlab.com/group/app!0", HOSTS, "gitlab.com")).toBeNull();
+    expect(parseGitlabTarget("not a ref", HOSTS, "gitlab.com")).toBeNull();
+  });
+
+  it("reads web URLs, including subfolder and port installs", () => {
+    expect(
+      parseGitlabTarget(
+        "https://gitlab.com/group/app/-/merge_requests/12/diffs#note_5",
+        HOSTS,
+        "gitlab.com",
+      ),
+    ).toEqual({ kind: "mr", project: "gitlab.com/group/app", iid: 12 });
+    expect(
+      parseGitlabTarget(
+        "https://code.example.dev/gitlab/group/app/-/issues/3",
+        HOSTS,
+        "gitlab.com",
+      ),
+    ).toEqual({ kind: "issue", project: "code.example.dev/group/app", iid: 3 });
+    expect(
+      parseGitlabTarget(
+        "https://devops.corp:8443/team/svc/-/pipelines/900",
+        HOSTS,
+        "gitlab.com",
+      ),
+    ).toEqual({ kind: "pipeline", project: "devops.corp/team/svc", id: 900 });
+    expect(
+      parseGitlabTarget("https://gitlab.com/group/app/-/jobs/31", HOSTS, "gitlab.com"),
+    ).toEqual({ kind: "job", project: "gitlab.com/group/app", id: 31 });
+    expect(
+      parseGitlabTarget("https://gitlab.com/group/app/", HOSTS, "gitlab.com"),
+    ).toEqual({ kind: "project", project: "gitlab.com/group/app" });
+    expect(
+      parseGitlabTarget("https://gitlab.com/group/app/-/tree/main", HOSTS, "gitlab.com"),
+    ).toEqual({ kind: "project", project: "gitlab.com/group/app" });
+  });
+
+  it("tails a job trace without terminal escapes", () => {
+    const trace = [
+      "\x1b[0Ksection_start:1700000000:step_script\r\x1b[0K\x1b[32;1mExecuting step\x1b[0;m",
+      "Downloading 10%\rDownloading 100%",
+      "\x1b[31mFAIL\x1b[0m src/app.test.ts",
+      "section_end:1700000001:step_script\r\x1b[0K",
+      "",
+    ].join("\n");
+    expect(tailJobLog(trace, 2)).toBe(
+      ["Downloading 100%", "FAIL src/app.test.ts"].join("\n"),
+    );
+    expect(tailJobLog(trace, 10).split("\n")[0]).toBe("Executing step");
+    expect(tailJobLog(trace, 0)).toBe("");
+    const failed = [
+      "section_start:1:step_script\r\x1b[0KRunning tests",
+      "E   AssertionError: 1 != 2",
+      "section_end:2:step_script\r\x1b[0K",
+      // GitLab writes one section's end and the next one's start on one line.
+      "section_start:3:after_script\r\x1b[0KRunning after script...",
+      "$ ls report/",
+      "section_end:4:after_script\r\x1b[0Ksection_start:4:upload_artifacts_on_failure\r\x1b[0KUploading artifacts...",
+      "report.xml: found 1 matching artifact files",
+      "section_end:5:upload_artifacts_on_failure\r\x1b[0Ksection_start:5:cleanup_file_variables\r\x1b[0KCleaning up",
+      "section_end:6:cleanup_file_variables\r\x1b[0K\x1b[31;1mERROR: Job failed: exit code 1\x1b[0;m",
+    ].join("\n");
+    expect(tailJobLog(failed, 2)).toBe(
+      ["E   AssertionError: 1 != 2", "ERROR: Job failed: exit code 1"].join("\n"),
     );
   });
 });

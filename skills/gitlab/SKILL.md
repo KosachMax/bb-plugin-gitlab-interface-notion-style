@@ -14,18 +14,37 @@ Two tools, different jobs:
 ## Find work
 
 ```sh
-bb gitlab projects                       # tracked projects, host-qualified
+bb gitlab projects [--json]              # tracked projects, host-qualified
 bb gitlab issues [host/group/project]    # cached open issues
 bb gitlab mrs [host/group/project]       # cached open merge requests
 bb gitlab sync                           # refresh the cache now
 ```
 
+Lists take filters: `--state open|closed|merged|all`, `--mine`,
+`--author <user|@me>`, `--assignee <user|@me>`, `--label <name>` (repeat for
+several), `--draft` (MRs), `--limit <n>`, `--json`. They read the cache, which
+holds open items plus one page of recently closed ones, so an old closed item
+may be missing; ask GitLab directly for history.
+
 A project is always host-qualified — `gitlab.example.dev/group/subgroup/app` —
 because a namespace path has any number of segments and the same path may exist
 on two instances. Issues print as `<project>#<iid>`, merge requests as
-`<project>!<iid>`.
+`<project>!<iid>`. Every command below also accepts the item's web URL.
 
-## Read details
+## Read details and CI
+
+```sh
+bb gitlab show <project>!12 [--json]           # MR: branches, merge status, approvals, pipeline, comments
+bb gitlab show <project>#7                     # issue with comments
+bb gitlab pipeline <project>!12                # head pipeline: jobs + last 30 lines of each failed job
+bb gitlab pipeline <project> --ref main        # latest pipeline on a branch (default: default branch)
+bb gitlab pipeline <job or pipeline URL> --logs 200
+```
+
+With no target, `pipeline`, `retry`, and `run` use the GitLab project of the
+BB project the command runs in.
+
+For diffs and anything else, use glab:
 
 ```sh
 glab issue view <iid> -R <project> --comments
@@ -59,7 +78,19 @@ glab auth status --hostname <host>        # prints the resolved REST endpoint
 
 ## Write
 
-Prefer `glab` subcommands; they set the right defaults.
+Only when the user asked for it. Single-quote refs and comment text: in a
+shell, ` #` starts a comment, `!` expands history, and `$` and backticks
+expand, so unquoted text reaches GitLab cut or changed.
+
+```sh
+bb gitlab comment '<project>!12' 'Looks good, one nit: see #3'
+bb gitlab retry <project>!12               # retry the head pipeline's failed/canceled jobs
+bb gitlab retry <project>!12 --job lint    # retry one job, by name or id
+bb gitlab run <project>!12                 # new merge-request pipeline
+bb gitlab run <project> --ref main         # new pipeline on a branch
+```
+
+For other writes, prefer `glab` subcommands; they set the right defaults.
 
 ```sh
 glab mr create --fill --target-branch <base> -R <project>

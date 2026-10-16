@@ -14,7 +14,11 @@
 // — because a GitLab path has any number of namespace segments and the same
 // path can exist on two instances.
 import { execFile } from "node:child_process";
-import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import {
+  defineRpcContract,
+  type BbPluginApi,
+  type PluginCliContext,
+} from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 const SYNC_INTERVAL_MS = 5 * 60_000;
@@ -369,6 +373,28 @@ const gitlabJobListSchema = z
     }),
   )
   .catch([]);
+const gitlabPipelineRowSchema = z.looseObject({
+  id: z.number().int().positive(),
+  status: z.string().catch(""),
+  ref: z.string().catch(""),
+  sha: z.string().catch(""),
+  web_url: z.string().catch(""),
+});
+const gitlabPipelineJobRowSchema = z.looseObject({
+  id: z.number().int().positive(),
+  name: z.string().catch("job"),
+  stage: z.string().catch(""),
+  status: z.string().catch(""),
+  allow_failure: z.boolean().catch(false),
+  web_url: z.string().catch(""),
+  pipeline: z
+    .looseObject({ id: z.number().int().positive() })
+    .nullish()
+    .catch(null),
+});
+const gitlabPipelineJobListSchema = z
+  .array(gitlabPipelineJobRowSchema.nullable().catch(null))
+  .catch([]);
 const gitlabApprovalsSchema = z
   .looseObject({
     approvals_required: z.number().int().nonnegative().catch(0),
@@ -613,24 +639,364 @@ export function classifyJobStatus(
   }
 }
 
+// ---------------------------------------------------------------------------
+// `bb gitlab` argument parsing. Pure, so the shape of every subcommand is
+// testable without glab; resolving a target against the authenticated hosts
+// happens at run time (parseGitlabTarget).
+// ---------------------------------------------------------------------------
+
+export interface GitlabListFilters {
+  /** "closed" and "merged" are exact GitLab states; "all" keeps everything. */
+  state: "open" | "closed" | "merged" | "all";
+  /** Assigned to the glab user of each item's host. */
+  mine: boolean;
+  /** Username, or "@me". */
+  author: string | null;
+  /** Username, or "@me". */
+  assignee: string | null;
+  /** Every label must be present. */
+  labels: string[];
+  draft: boolean;
+  limit: number | null;
+  json: boolean;
+}
+
+export interface GitlabPipelineSelector {
+  /** Raw target as typed; null means the BB project the CLI runs in. */
+  target: string | null;
+  ref: string | null;
+  pipelineId: number | null;
+}
+
+export type GitlabCliCommand =
+  | { sub: "help" }
+  | { sub: "projects"; json: boolean }
+  | { sub: "sync" }
+  | {
+      sub: "issues" | "mrs";
+      project: string | null;
+      filters: GitlabListFilters;
+    }
+  | { sub: "show"; target: string; json: boolean }
+  | { sub: "comment"; target: string; body: string }
+  | ({ sub: "pipeline"; logs: number; json: boolean } & GitlabPipelineSelector)
+  | ({ sub: "retry"; job: string | null } & GitlabPipelineSelector)
+  | { sub: "run"; target: string | null; ref: string | null };
+
+/** Lines of each failed job's log `bb gitlab pipeline` prints by default. */
+export const DEFAULT_JOB_LOG_LINES = 30;
+
+interface FlagSpec {
+  booleans: readonly string[];
+  values: readonly string[];
+  /** Value flags that may be given more than once. */
+  repeatable?: readonly string[];
+}
+
+/**
+ * `--flag`, `--flag value`, and `--flag=value`. Anything not starting with
+ * `--` is positional; a bare `--` ends flag parsing.
+ */
+function parseFlags(
+  args: readonly string[],
+  spec: FlagSpec,
+):
+  | {
+      positionals: string[];
+      booleans: Set<string>;
+      values: Map<string, string[]>;
+    }
+  | { error: string } {
+  const positionals: string[] = [];
+  const booleans = new Set<string>();
+  const values = new Map<string, string[]>();
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      positionals.push(...args.slice(index + 1));
+      break;
+    }
+    if (!arg.startsWith("--")) {
+      positionals.push(arg);
+      continue;
+    }
+    const equals = arg.indexOf("=");
+    const name = equals < 0 ? arg.slice(2) : arg.slice(2, equals);
+    if (spec.booleans.includes(name)) {
+      if (equals >= 0) return { error: `Flag --${name} takes no value.` };
+      booleans.add(name);
+      continue;
+    }
+    if (!spec.values.includes(name)) {
+      return { error: `Unknown flag "--${name}".` };
+    }
+    let value: string | undefined;
+    if (equals >= 0) {
+      value = arg.slice(equals + 1);
+    } else {
+      value = args[index + 1];
+      index += 1;
+    }
+    if (value === undefined || value.trim().length === 0) {
+      return { error: `Flag --${name} needs a value.` };
+    }
+    const seen = values.get(name) ?? [];
+    if (seen.length > 0 && !(spec.repeatable ?? []).includes(name)) {
+      return { error: `Flag --${name} given twice.` };
+    }
+    values.set(name, [...seen, value]);
+  }
+  return { positionals, booleans, values };
+}
+
+function parsePositiveInt(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function parseNonNegativeInt(value: string): number | null {
+  return value === "0" ? 0 : parsePositiveInt(value);
+}
+
+export function parseGitlabCliArgs(
+  argv: readonly string[],
+): GitlabCliCommand | { error: string } {
+  const [sub, ...args] = argv;
+  if (sub === undefined || sub === "help" || sub === "--help" || sub === "-h") {
+    return args.length === 0
+      ? { sub: "help" }
+      : { error: `Unexpected argument "${args[0]}".` };
+  }
+
+  if (sub === "comment") {
+    // The body is everything after the target, unparsed: agents rarely quote,
+    // and comment text may well contain "--".
+    const [target, ...words] = args;
+    const body = words.join(" ").trim();
+    if (target === undefined || body.length === 0) {
+      return { error: "Usage: bb gitlab comment <issue-or-mr> <text…>" };
+    }
+    return { sub: "comment", target, body };
+  }
+
+  const specs: Record<string, FlagSpec> = {
+    projects: { booleans: ["json"], values: [] },
+    sync: { booleans: [], values: [] },
+    issues: {
+      booleans: ["mine", "json"],
+      values: ["state", "author", "assignee", "label", "limit"],
+      repeatable: ["label"],
+    },
+    mrs: {
+      booleans: ["mine", "draft", "json"],
+      values: ["state", "author", "assignee", "label", "limit"],
+      repeatable: ["label"],
+    },
+    show: { booleans: ["json"], values: [] },
+    pipeline: { booleans: ["json"], values: ["ref", "pipeline", "logs"] },
+    retry: { booleans: [], values: ["ref", "pipeline", "job"] },
+    run: { booleans: [], values: ["ref"] },
+  };
+  const spec = specs[sub];
+  if (spec === undefined) return { error: `Unknown subcommand "${sub}".` };
+  const parsed = parseFlags(args, spec);
+  if ("error" in parsed) return parsed;
+  const { positionals, booleans, values } = parsed;
+  const value = (name: string): string | null => values.get(name)?.[0] ?? null;
+  const maxPositionals = sub === "projects" || sub === "sync" ? 0 : 1;
+  if (positionals.length > maxPositionals) {
+    return maxPositionals === 0
+      ? { error: `Subcommand "${sub}" does not accept arguments.` }
+      : { error: `Unexpected argument "${positionals[1]}".` };
+  }
+  const target = positionals[0] ?? null;
+
+  switch (sub) {
+    case "projects":
+      return { sub, json: booleans.has("json") };
+    case "sync":
+      return { sub };
+    case "issues":
+    case "mrs": {
+      if (target !== null && !isProjectRef(target)) {
+        return {
+          error: `Invalid project "${target}"; expected host/group/project.`,
+        };
+      }
+      const state = value("state") ?? "open";
+      if (
+        state !== "open" &&
+        state !== "closed" &&
+        state !== "merged" &&
+        state !== "all"
+      ) {
+        return {
+          error: `Invalid --state "${state}"; expected open, closed, merged, or all.`,
+        };
+      }
+      if (sub === "issues" && state === "merged") {
+        return { error: "Issues are never merged; use --state closed." };
+      }
+      const rawLimit = value("limit");
+      const limit = rawLimit === null ? null : parsePositiveInt(rawLimit);
+      if (rawLimit !== null && limit === null) {
+        return { error: `Invalid --limit "${rawLimit}"; expected a positive number.` };
+      }
+      if (booleans.has("mine") && value("assignee") !== null) {
+        return { error: "--mine already means --assignee @me." };
+      }
+      return {
+        sub,
+        project: target,
+        filters: {
+          state,
+          mine: booleans.has("mine"),
+          author: value("author"),
+          assignee: value("assignee"),
+          labels: values.get("label") ?? [],
+          draft: booleans.has("draft"),
+          limit,
+          json: booleans.has("json"),
+        },
+      };
+    }
+    case "show":
+      if (target === null) {
+        return { error: "Usage: bb gitlab show <issue-or-mr>" };
+      }
+      return { sub, target, json: booleans.has("json") };
+    case "pipeline":
+    case "retry": {
+      const rawPipeline = value("pipeline");
+      const pipelineId =
+        rawPipeline === null ? null : parsePositiveInt(rawPipeline);
+      if (rawPipeline !== null && pipelineId === null) {
+        return { error: `Invalid --pipeline "${rawPipeline}"; expected a pipeline id.` };
+      }
+      if (pipelineId !== null && value("ref") !== null) {
+        return { error: "Pass --pipeline or --ref, not both." };
+      }
+      const selector = { target, ref: value("ref"), pipelineId };
+      if (sub === "retry") return { sub, ...selector, job: value("job") };
+      const rawLogs = value("logs");
+      const logs =
+        rawLogs === null ? DEFAULT_JOB_LOG_LINES : parseNonNegativeInt(rawLogs);
+      if (logs === null) {
+        return { error: `Invalid --logs "${rawLogs}"; expected a number of lines.` };
+      }
+      return { sub, ...selector, logs, json: booleans.has("json") };
+    }
+    case "run":
+      return { sub, target, ref: value("ref") };
+  }
+  return { error: `Unknown subcommand "${sub}".` };
+}
+
 export function validateGitlabCliArgs(argv: string[]): string | null {
-  const [sub, arg, ...rest] = argv;
-  if (rest.length > 0) return `Unexpected argument "${rest[0]}".`;
-  if (sub === undefined) return null;
-  if (sub === "help" || sub === "--help") {
-    return arg === undefined ? null : `Unexpected argument "${arg}".`;
+  const parsed = parseGitlabCliArgs(argv);
+  return "error" in parsed ? parsed.error : null;
+}
+
+/** What a `bb gitlab` target names, once resolved against glab's hosts. */
+export type GitlabTarget =
+  | { kind: "project"; project: string }
+  | { kind: "issue" | "mr"; project: string; iid: number }
+  | { kind: "pipeline" | "job"; project: string; id: number };
+
+const WEB_URL_RESOURCES: Record<string, "issue" | "mr" | "pipeline" | "job"> = {
+  issues: "issue",
+  work_items: "issue",
+  merge_requests: "mr",
+  pipelines: "pipeline",
+  jobs: "job",
+};
+
+/**
+ * A target as a user or agent writes it:
+ *
+ * - `host/group/app#7` (issue) or `host/group/app!12` (merge request)
+ * - a web URL copied from the browser — `…/group/app/-/merge_requests/12`,
+ *   `/-/issues/7`, `/-/pipelines/900`, `/-/jobs/31` — which also sidesteps
+ *   zsh history expansion of `!`
+ * - a bare project ref, `host/group/app`
+ *
+ * URLs go through the hosts' glab config, so subfolder and port installs map
+ * back to the ref glab knows. Null when the value is none of these.
+ */
+export function parseGitlabTarget(
+  raw: string,
+  knownHosts: readonly GitlabHost[],
+  fallbackHost: string,
+): GitlabTarget | null {
+  const value = raw.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    const withoutQuery = value.replace(/[?#].*$/, "").replace(/\/+$/, "");
+    // GitLab puts every project page after "/-/"; one this parser has no kind
+    // for (tree, blob, commits…) still names its project.
+    const dash = withoutQuery.indexOf("/-/");
+    const project = normalizeProjectRef(
+      dash < 0 ? withoutQuery : withoutQuery.slice(0, dash),
+      knownHosts,
+      fallbackHost,
+    );
+    if (project === null) return null;
+    const match =
+      dash < 0 ? null : withoutQuery.slice(dash).match(/^\/-\/([a-z_]+)\/(\d+)(?:\/|$)/);
+    const kind = match === null ? undefined : WEB_URL_RESOURCES[match[1]];
+    const number = match === null ? null : parsePositiveInt(match[2]);
+    if (kind === undefined || number === null) return { kind: "project", project };
+    return kind === "issue" || kind === "mr"
+      ? { kind, project, iid: number }
+      : { kind, project, id: number };
   }
-  if (sub === "projects" || sub === "sync") {
-    return arg === undefined
-      ? null
-      : `Subcommand "${sub}" does not accept arguments.`;
+  const separator = Math.max(value.lastIndexOf("#"), value.lastIndexOf("!"));
+  if (separator > 0) {
+    const project = value.slice(0, separator);
+    const iid = parsePositiveInt(value.slice(separator + 1));
+    if (!isProjectRef(project) || iid === null) return null;
+    return { kind: value[separator] === "!" ? "mr" : "issue", project, iid };
   }
-  if ((sub === "issues" || sub === "mrs") && arg !== undefined) {
-    return isProjectRef(arg)
-      ? null
-      : `Invalid project "${arg}"; expected host/group/project.`;
-  }
-  return null;
+  return isProjectRef(value) ? { kind: "project", project: value } : null;
+}
+
+/** Never why a job failed: GitLab ignores after_script errors for job status. */
+const RUNNER_HOUSEKEEPING_SECTIONS = [
+  "after_script",
+  "upload_artifacts_on_success",
+  "upload_artifacts_on_failure",
+  "archive_cache",
+  "archive_cache_on_failure",
+  "cleanup_file_variables",
+];
+
+/**
+ * The last `lines` lines of a raw GitLab job trace, readable in a terminal:
+ * ANSI colors, collapsible-section markers, and carriage-return progress
+ * redraws removed.
+ */
+export function tailJobLog(trace: string, lines: number): string {
+  if (lines <= 0) return "";
+  const cleaned = trace
+    // Runner housekeeping after the script (artifact upload, cache archive,
+    // cleanup) would otherwise fill the tail and push the real error out.
+    .replace(
+      new RegExp(
+        `section_start:\\d+:(${RUNNER_HOUSEKEEPING_SECTIONS.join("|")})\\b[\\s\\S]*?section_end:\\d+:\\1\\r?(?:\x1b\\[0K)?`,
+        "g",
+      ),
+      "",
+    )
+    // A section end sits on a line of its own; drop the line, not just the marker.
+    .replace(/^(?:\x1b\[0K)?section_end:\d+:[A-Za-z0-9_.-]+\r?(?:\x1b\[0K)?\r?\n/gm, "")
+    .replace(/section_(?:start|end):\d+:[A-Za-z0-9_.-]+(?:\[[^\]]*\])?/g, "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .split("\n")
+    // A progress bar redraws with \r; only the last redraw is visible.
+    .map((line) => line.replace(/\r+$/, "").split("\r").at(-1) ?? "")
+    .map((line) => line.trimEnd());
+  while (cleaned.length > 0 && cleaned.at(-1) === "") cleaned.pop();
+  return cleaned.slice(-lines).join("\n");
 }
 
 function usernames(rows: readonly GitlabUserRow[]): string[] {
@@ -1862,113 +2228,724 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+
   // ------------------------------------------------------------------
   // CLI: `bb gitlab …` for agents and terminals.
   // ------------------------------------------------------------------
   const USAGE = [
     "Usage:",
-    "  bb gitlab projects           List tracked GitLab projects",
-    "  bb gitlab issues [project]   List cached open issues",
-    "  bb gitlab mrs [project]      List cached open merge requests",
-    "  bb gitlab sync               Refresh the cache from GitLab now",
+    "  bb gitlab projects [--json]                List tracked GitLab projects",
+    "  bb gitlab issues [project] [filters]       List cached issues",
+    "  bb gitlab mrs [project] [filters]          List cached merge requests",
+    "  bb gitlab sync                             Refresh the cache from GitLab now",
+    "  bb gitlab show <item> [--json]             Issue or MR detail with comments (live)",
+    "  bb gitlab comment <item> <text…>           Add a comment to an issue or MR",
+    "  bb gitlab pipeline [target] [options]      Pipeline status, jobs, failed-job logs",
+    "  bb gitlab retry [target] [options]         Retry failed jobs, or one job with --job",
+    "  bb gitlab run [target] [--ref <branch>]    Start a new pipeline",
     "",
-    "A project is written host-qualified: gitlab.com/group/subgroup/app",
+    "List filters (issues, mrs):",
+    "  --state open|closed|merged|all   default open; merged is MRs only",
+    "  --mine                           assigned to you",
+    "  --author <user|@me>  --assignee <user|@me>",
+    "  --label <name>                   repeat to require several labels",
+    "  --draft                          drafts only (mrs)",
+    "  --limit <n>  --json",
+    "  Lists read the cache: open items plus one page of recently closed ones.",
+    "",
+    "Pipeline options (pipeline, retry):",
+    "  --ref <branch>       latest pipeline on that branch (default: the default branch)",
+    "  --pipeline <id>      a specific pipeline",
+    "  --logs <n>           failed-job log lines to print, default " +
+      `${DEFAULT_JOB_LOG_LINES}; 0 for none (pipeline)`,
+    "  --job <id|name>      retry only this job (retry)",
+    "",
+    "An item is host/group/app#7 (issue), host/group/app!12 (merge request), or",
+    "its web URL. Quote refs in a shell: 'host/group/app!12'.",
+    "A target is an item, a project (host/group/app), or a pipeline or job URL;",
+    "omitted, it is the GitLab project of the BB project the command runs in.",
   ].join("\n");
+
+  const CLI_OUTPUT_MAX_BYTES = 900_000;
+
+  /** Keeps stdout under the CLI transport limit, cutting the tail. */
+  function clipOutput(text: string): string {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length <= CLI_OUTPUT_MAX_BYTES) return text;
+    return `${bytes.subarray(0, CLI_OUTPUT_MAX_BYTES).toString("utf8")}\n… output truncated`;
+  }
+
+  function projectApiBase(project: string): string {
+    return `projects/${encodeURIComponent(parseProjectRef(project).path)}`;
+  }
+
+  async function ensureGlab(): Promise<void> {
+    if (glabAuthError !== null || authenticatedHosts.length === 0) {
+      await checkAuth();
+    }
+  }
+
+  /** A typed target, or — when omitted — the BB project the CLI runs in. */
+  async function resolveCliTarget(
+    raw: string | null,
+    ctx: PluginCliContext,
+  ): Promise<GitlabTarget> {
+    await ensureGlab();
+    if (raw === null) {
+      const projects = await discoverProjects();
+      const current =
+        ctx.projectId === undefined
+          ? undefined
+          : projects.find((entry) => entry.bbProjectId === ctx.projectId);
+      if (current === undefined) {
+        throw new Error(
+          "No target given, and this BB project has no GitLab remote. " +
+            "Pass a project (host/group/app), an MR (host/group/app!12), or a URL.",
+        );
+      }
+      return { kind: "project", project: current.project };
+    }
+    const { defaultHost } = await settings.get();
+    const target = parseGitlabTarget(raw, authenticatedHosts, defaultHost);
+    if (target === null) {
+      throw new Error(
+        `Cannot read "${raw}" as a GitLab project, issue (project#7), ` +
+          "merge request (project!12), or web URL.",
+      );
+    }
+    return target;
+  }
+
+  async function resolveCliItem(
+    raw: string,
+    ctx: PluginCliContext,
+  ): Promise<{ kind: "issue" | "mr"; project: string; iid: number }> {
+    const target = await resolveCliTarget(raw, ctx);
+    if (target.kind !== "issue" && target.kind !== "mr") {
+      throw new Error(
+        `"${raw}" is not an issue or merge request; write it as project#7, project!12, or its URL.`,
+      );
+    }
+    return target;
+  }
+
+  function formatDetailBlock(lines: Array<string | null>): string {
+    return lines.filter((line): line is string => line !== null).join("\n");
+  }
+
+  function formatNotes(notes: readonly Note[]): string {
+    if (notes.length === 0) return "--- No comments ---";
+    return [
+      `--- Comments (${notes.length}) ---`,
+      ...notes.map((note) => `\n@${note.author} · ${note.createdAt}\n${note.body}`),
+    ].join("\n");
+  }
+
+  async function cliShow(
+    raw: string,
+    json: boolean,
+    ctx: PluginCliContext,
+  ): Promise<string> {
+    const item = await resolveCliItem(raw, ctx);
+    const base = `${projectApiBase(item.project)}/${
+      item.kind === "mr" ? "merge_requests" : "issues"
+    }/${item.iid}`;
+    const notesEndpoint = `${base}/notes?per_page=100&sort=asc&order_by=created_at`;
+    const marker = item.kind === "mr" ? "!" : "#";
+    const list = (names: readonly string[]): string =>
+      names.length > 0 ? names.join(", ") : "—";
+
+    if (item.kind === "issue") {
+      const [detailRaw, notesRaw] = await Promise.all([
+        gitlabApi(item.project, base),
+        gitlabApi(item.project, notesEndpoint),
+      ]);
+      const detail = gitlabItemRowSchema.parse(detailRaw);
+      const notes = toNotes(notesRaw);
+      if (json) {
+        return JSON.stringify(
+          { ...toItem(detail, item.project, "issue"), notes },
+          null,
+          2,
+        );
+      }
+      return [
+        formatDetailBlock([
+          `${item.project}#${item.iid}  ${detail.title}  [${detail.state}]`,
+          `Author: ${detail.author?.username ?? ""} · Updated: ${detail.updated_at}`,
+          `Assignees: ${list(usernames(detail.assignees))} · Labels: ${list(detail.labels)}`,
+          `URL: ${detail.web_url}`,
+        ]),
+        detail.description.length > 0 ? detail.description : "(no description)",
+        formatNotes(notes),
+      ].join("\n\n");
+    }
+
+    const [detailRaw, notesRaw, approvalsRaw] = await Promise.all([
+      gitlabApi(item.project, base),
+      gitlabApi(item.project, notesEndpoint),
+      gitlabApi(item.project, `${base}/approvals`).catch(() => undefined),
+    ]);
+    const detail = gitlabMergeRequestRowSchema.parse(detailRaw);
+    const approvals = gitlabApprovalsSchema.parse(approvalsRaw);
+    const notes = toNotes(notesRaw);
+    const draft = detail.draft || detail.work_in_progress;
+    const summary = {
+      ...toItem(detail, item.project, "mr"),
+      sourceBranch: detail.source_branch,
+      targetBranch: detail.target_branch,
+      reviewers: usernames(detail.reviewers),
+      mergeStatus: detail.detailed_merge_status || detail.merge_status,
+      hasConflicts: detail.has_conflicts,
+      approvalsRequired: approvals.approvals_required,
+      approvalsLeft: approvals.approvals_left,
+      approvedBy: approvals.approved_by
+        .map((entry) => entry.user?.username ?? "")
+        .filter((name) => name.length > 0),
+      pipeline:
+        detail.head_pipeline == null
+          ? null
+          : {
+              id: detail.head_pipeline.id,
+              status: detail.head_pipeline.status,
+              url: detail.head_pipeline.web_url,
+            },
+      notes,
+    };
+    if (json) return JSON.stringify(summary, null, 2);
+    return [
+      formatDetailBlock([
+        `${item.project}${marker}${item.iid}  ${detail.title}  [${detail.state}${
+          draft ? ", draft" : ""
+        }]`,
+        `Author: ${summary.author} · Created: ${detail.created_at} · Updated: ${detail.updated_at}`,
+        `Branches: ${summary.sourceBranch} → ${summary.targetBranch}`,
+        `Assignees: ${list(summary.assignees)} · Reviewers: ${list(summary.reviewers)} · Labels: ${list(summary.labels)}`,
+        `Merge status: ${summary.mergeStatus || "unknown"}${
+          summary.hasConflicts ? " · has conflicts" : ""
+        } · Approvals left: ${summary.approvalsLeft}/${summary.approvalsRequired}${
+          summary.approvedBy.length > 0
+            ? ` (approved by ${summary.approvedBy.join(", ")})`
+            : ""
+        }`,
+        summary.pipeline === null
+          ? "Pipeline: none"
+          : `Pipeline: #${summary.pipeline.id ?? "?"} ${summary.pipeline.status} ${summary.pipeline.url}`,
+        `URL: ${detail.web_url}`,
+      ]),
+      detail.description.length > 0 ? detail.description : "(no description)",
+      formatNotes(notes),
+    ].join("\n\n");
+  }
+
+  async function cliComment(
+    raw: string,
+    body: string,
+    ctx: PluginCliContext,
+  ): Promise<string> {
+    const item = await resolveCliItem(raw, ctx);
+    const collection = item.kind === "mr" ? "merge_requests" : "issues";
+    const note = z
+      .looseObject({ id: z.number().int().catch(0) })
+      .catch({ id: 0 })
+      .parse(
+        await gitlabApi(
+          item.project,
+          `${projectApiBase(item.project)}/${collection}/${item.iid}/notes`,
+          { method: "POST", fields: { body } },
+        ),
+      );
+    const marker = item.kind === "mr" ? "!" : "#";
+    return `Commented on ${item.project}${marker}${item.iid}${
+      note.id > 0 ? ` (note ${note.id})` : ""
+    }.`;
+  }
+
+  type PipelineRow = z.infer<typeof gitlabPipelineRowSchema>;
+  type PipelineJobRow = z.infer<typeof gitlabPipelineJobRowSchema>;
+
+  async function getJob(project: string, id: number): Promise<PipelineJobRow> {
+    return gitlabPipelineJobRowSchema.parse(
+      await gitlabApi(project, `${projectApiBase(project)}/jobs/${id}`),
+    );
+  }
+
+  /** The pipeline a selector points at: explicit id, MR head, job's, or latest on a ref. */
+  async function resolveCliPipeline(
+    selector: GitlabPipelineSelector,
+    ctx: PluginCliContext,
+  ): Promise<{ project: string; pipeline: PipelineRow }> {
+    const target = await resolveCliTarget(selector.target, ctx);
+    if (target.kind === "issue") {
+      throw new Error(
+        "Issues have no pipelines; pass a project, a merge request, or a pipeline URL.",
+      );
+    }
+    const { project } = target;
+    const base = projectApiBase(project);
+    let pipelineId = selector.pipelineId;
+    if (pipelineId === null && target.kind === "pipeline") pipelineId = target.id;
+    if (pipelineId === null && target.kind === "job") {
+      pipelineId = (await getJob(project, target.id)).pipeline?.id ?? null;
+    }
+    if (pipelineId === null && target.kind === "mr" && selector.ref === null) {
+      const mr = gitlabMergeRequestRowSchema.parse(
+        await gitlabApi(project, `${base}/merge_requests/${target.iid}`),
+      );
+      pipelineId = mr.head_pipeline?.id ?? null;
+      if (pipelineId === null) {
+        throw new Error(
+          `${project}!${target.iid} has no pipeline yet. Start one with \`bb gitlab run\`.`,
+        );
+      }
+    }
+    if (pipelineId !== null) {
+      return {
+        project,
+        pipeline: gitlabPipelineRowSchema.parse(
+          await gitlabApi(project, `${base}/pipelines/${pipelineId}`),
+        ),
+      };
+    }
+    // The pipeline list works on every GitLab version; pipelines/latest is newer.
+    const ref = selector.ref ?? (await getDefaultBranch(project));
+    const [latest] = z
+      .array(gitlabPipelineRowSchema.nullable().catch(null))
+      .catch([])
+      .parse(
+        await gitlabApi(
+          project,
+          `${base}/pipelines?ref=${encodeURIComponent(ref)}&order_by=id&sort=desc&per_page=1`,
+        ),
+      );
+    if (latest == null) {
+      throw new Error(`No pipeline on ${ref} in ${project}.`);
+    }
+    return { project, pipeline: latest };
+  }
+
+  async function getDefaultBranch(project: string): Promise<string> {
+    const { default_branch } = z
+      .looseObject({ default_branch: z.string().catch("") })
+      .parse(await gitlabApi(project, projectApiBase(project)));
+    if (default_branch.length === 0) {
+      throw new Error(`${project} has no default branch; pass --ref.`);
+    }
+    return default_branch;
+  }
+
+  async function listPipelineJobs(
+    project: string,
+    pipelineId: number,
+  ): Promise<PipelineJobRow[]> {
+    return gitlabPipelineJobListSchema
+      .parse(
+        await gitlabApi(
+          project,
+          `${projectApiBase(project)}/pipelines/${pipelineId}/jobs?per_page=100`,
+        ),
+      )
+      .filter((job): job is PipelineJobRow => job !== null)
+      .sort((left, right) => left.id - right.id);
+  }
+
+  /** Jobs whose logs `bb gitlab pipeline` prints, so output stays bounded. */
+  const MAX_LOGGED_JOBS = 5;
+
+  async function cliPipeline(
+    command: Extract<GitlabCliCommand, { sub: "pipeline" }>,
+    ctx: PluginCliContext,
+  ): Promise<string> {
+    const { project, pipeline } = await resolveCliPipeline(command, ctx);
+    const jobs = await listPipelineJobs(project, pipeline.id);
+    const failed = jobs.filter((job) => job.status === "failed");
+    const logs = new Map<number, string>();
+    if (command.logs > 0) {
+      const { host } = parseProjectRef(project);
+      await Promise.all(
+        failed.slice(0, MAX_LOGGED_JOBS).map(async (job) => {
+          try {
+            // The trace is plain text, so this skips gitlabApi's JSON parse.
+            const trace = await glab(
+              [
+                "api",
+                "--hostname",
+                host,
+                `${projectApiBase(project)}/jobs/${job.id}/trace`,
+              ],
+              60_000,
+            );
+            logs.set(job.id, tailJobLog(trace, command.logs));
+          } catch (error) {
+            logs.set(
+              job.id,
+              `(log unavailable: ${error instanceof Error ? error.message : String(error)})`,
+            );
+          }
+        }),
+      );
+    }
+
+    if (command.json) {
+      return JSON.stringify(
+        {
+          project,
+          pipeline: {
+            id: pipeline.id,
+            status: pipeline.status,
+            ref: pipeline.ref,
+            sha: pipeline.sha,
+            url: pipeline.web_url,
+          },
+          jobs: jobs.map((job) => ({
+            id: job.id,
+            name: job.name,
+            stage: job.stage,
+            status: job.status,
+            allowFailure: job.allow_failure,
+            url: job.web_url,
+            ...(logs.has(job.id) ? { log: logs.get(job.id) } : {}),
+          })),
+        },
+        null,
+        2,
+      );
+    }
+
+    const width = (values: string[]): number =>
+      Math.max(0, ...values.map((value) => value.length));
+    const statusWidth = width(jobs.map((job) => job.status));
+    const stageWidth = width(jobs.map((job) => job.stage));
+    const sections = [
+      [
+        `Pipeline #${pipeline.id} ${pipeline.status} · ${pipeline.ref} @ ${pipeline.sha.slice(0, 8)}`,
+        pipeline.web_url,
+      ].join("\n"),
+      jobs.length === 0
+        ? "No jobs: GitLab created none, usually a CI config or rules error. Open the URL above."
+        : jobs
+            .map(
+              (job) =>
+                `  ${job.status.padEnd(statusWidth)}  ${job.stage.padEnd(stageWidth)}  ${job.name}${
+                  job.allow_failure && job.status === "failed"
+                    ? " (allowed to fail)"
+                    : ""
+                }  [job ${job.id}]`,
+            )
+            .join("\n"),
+    ];
+    for (const job of failed) {
+      const log = logs.get(job.id);
+      if (log === undefined) continue;
+      sections.push(
+        `── ${job.name} (job ${job.id}) · last ${command.logs} lines ──\n${
+          log.length > 0 ? log : "(empty log)"
+        }`,
+      );
+    }
+    if (failed.length > MAX_LOGGED_JOBS && command.logs > 0) {
+      sections.push(
+        `${failed.length - MAX_LOGGED_JOBS} more failed job(s) not shown; ` +
+          "read one with `bb gitlab pipeline <job URL>` or glab.",
+      );
+    }
+    return sections.join("\n\n");
+  }
+
+  async function cliRetry(
+    command: Extract<GitlabCliCommand, { sub: "retry" }>,
+    ctx: PluginCliContext,
+  ): Promise<string> {
+    const retryJob = async (project: string, job: PipelineJobRow) => {
+      const retried = gitlabPipelineJobRowSchema.parse(
+        await gitlabApi(
+          project,
+          `${projectApiBase(project)}/jobs/${job.id}/retry`,
+          { method: "POST" },
+        ),
+      );
+      return `Retried job ${job.name} as job ${retried.id} (${retried.status}).\n${retried.web_url}`;
+    };
+
+    // A job URL with no --job retries that job, without a pipeline lookup.
+    if (command.job === null && command.target !== null) {
+      const target = await resolveCliTarget(command.target, ctx);
+      if (target.kind === "job" && command.pipelineId === null) {
+        return retryJob(target.project, await getJob(target.project, target.id));
+      }
+    }
+
+    const { project, pipeline } = await resolveCliPipeline(command, ctx);
+    const jobs = await listPipelineJobs(project, pipeline.id);
+    if (command.job !== null) {
+      const wanted = command.job;
+      const asId = parsePositiveInt(wanted);
+      const job =
+        jobs.find((entry) => asId !== null && entry.id === asId) ??
+        jobs.find((entry) => entry.name === wanted);
+      if (job === undefined) {
+        throw new Error(
+          `No job "${wanted}" in pipeline #${pipeline.id}. Jobs: ${
+            jobs.map((entry) => entry.name).join(", ") || "none"
+          }.`,
+        );
+      }
+      return retryJob(project, job);
+    }
+    const retryable = jobs.filter(
+      (job) => job.status === "failed" || job.status === "canceled",
+    );
+    if (retryable.length === 0) {
+      return (
+        `Nothing to retry: pipeline #${pipeline.id} (${pipeline.status}) has no ` +
+        "failed or canceled jobs. Start a fresh one with `bb gitlab run`."
+      );
+    }
+    const retried = gitlabPipelineRowSchema.parse(
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/pipelines/${pipeline.id}/retry`,
+        { method: "POST" },
+      ),
+    );
+    return [
+      `Retrying ${retryable.length} job(s) in pipeline #${retried.id} (now ${retried.status}): ${retryable
+        .map((job) => job.name)
+        .join(", ")}`,
+      retried.web_url,
+    ].join("\n");
+  }
+
+  async function cliRun(
+    command: Extract<GitlabCliCommand, { sub: "run" }>,
+    ctx: PluginCliContext,
+  ): Promise<string> {
+    const target = await resolveCliTarget(command.target, ctx);
+    const base = projectApiBase(target.project);
+    if (target.kind === "mr") {
+      if (command.ref !== null) {
+        throw new Error(
+          "A merge-request pipeline runs on its source branch; drop --ref, or pass the project instead.",
+        );
+      }
+      const started = gitlabPipelineRowSchema.parse(
+        await gitlabApi(
+          target.project,
+          `${base}/merge_requests/${target.iid}/pipelines`,
+          { method: "POST" },
+        ),
+      );
+      return `Started pipeline #${started.id} for ${target.project}!${target.iid} (${started.status}).\n${started.web_url}`;
+    }
+    if (target.kind !== "project") {
+      throw new Error(
+        "`run` takes a project or a merge request; to re-run an existing pipeline use `bb gitlab retry`.",
+      );
+    }
+    const ref = command.ref ?? (await getDefaultBranch(target.project));
+    const started = gitlabPipelineRowSchema.parse(
+      await gitlabApi(
+        target.project,
+        `${base}/pipeline?ref=${encodeURIComponent(ref)}`,
+        { method: "POST" },
+      ),
+    );
+    return `Started pipeline #${started.id} on ${ref} in ${target.project} (${started.status}).\n${started.web_url}`;
+  }
+
+  async function cliList(
+    command: Extract<GitlabCliCommand, { sub: "issues" | "mrs" }>,
+  ): Promise<string> {
+    const kind = command.sub === "mrs" ? "mr" : "issue";
+    const marker = kind === "mr" ? "!" : "#";
+    const { filters } = command;
+    const cached = listCachedItems({
+      kind,
+      project: command.project ?? undefined,
+    });
+    if (cached.length === 0) {
+      return "Nothing cached. Run `bb gitlab sync` first.";
+    }
+
+    // "@me" is per host: the glab user can differ between instances.
+    const viewers = new Map<string, string>();
+    const usesMe =
+      filters.mine || filters.author === "@me" || filters.assignee === "@me";
+    if (usesMe) {
+      await ensureGlab();
+      const hosts = new Set(
+        cached.map((item) => parseProjectRef(item.project).host),
+      );
+      for (const host of hosts) {
+        viewers.set(host, (await getViewer(host)).toLowerCase());
+      }
+    }
+    const who = (name: string, project: string): string =>
+      name === "@me"
+        ? (viewers.get(parseProjectRef(project).host) ?? "")
+        : name.replace(/^@/, "").toLowerCase();
+    const assignee = filters.mine ? "@me" : filters.assignee;
+    const wantedLabels = filters.labels.map((label) => label.toLowerCase());
+
+    let items = cached.filter((item) => {
+      if (filters.state === "open" && item.state !== "opened") return false;
+      if (filters.state === "closed" && item.state !== "closed") return false;
+      if (filters.state === "merged" && item.state !== "merged") return false;
+      if (filters.draft && !item.draft) return false;
+      if (
+        filters.author !== null &&
+        item.author.toLowerCase() !== who(filters.author, item.project)
+      ) {
+        return false;
+      }
+      if (
+        assignee !== null &&
+        !item.assignees.some(
+          (name) => name.toLowerCase() === who(assignee, item.project),
+        )
+      ) {
+        return false;
+      }
+      const labels = item.labels.map((label) => label.toLowerCase());
+      return wantedLabels.every((label) => labels.includes(label));
+    });
+    if (filters.limit !== null) items = items.slice(0, filters.limit);
+
+    if (filters.json) {
+      return JSON.stringify(
+        items.map(({ body: _body, ...item }) => item),
+        null,
+        2,
+      );
+    }
+    if (items.length === 0) {
+      return `No matching ${kind === "mr" ? "merge requests" : "issues"}.`;
+    }
+    return items
+      .map(
+        (item) =>
+          `${item.project}${marker}${item.iid}\t[${
+            item.draft ? "draft" : item.state
+          }]\t${item.title}`,
+      )
+      .join("\n");
+  }
 
   bb.cli.register({
     name: "gitlab",
-    summary: "Browse tracked GitLab projects, issues, and merge requests",
+    summary: "Browse tracked GitLab projects, issues, merge requests, and pipelines",
     commands: [
       {
         name: "projects",
         summary: "List tracked GitLab projects",
-        usage: "bb gitlab projects",
+        usage: "bb gitlab projects [--json]",
       },
       {
         name: "issues",
-        summary: "List cached open issues",
-        usage: "bb gitlab issues [host/group/project]",
+        summary: "List cached issues, filtered by state, author, assignee, label",
+        usage:
+          "bb gitlab issues [host/group/project] [--state open|closed|all] [--mine] " +
+          "[--author <user|@me>] [--assignee <user|@me>] [--label <name>]... [--limit <n>] [--json]",
       },
       {
         name: "mrs",
-        summary: "List cached open merge requests",
-        usage: "bb gitlab mrs [host/group/project]",
+        summary: "List cached merge requests, filtered by state, author, assignee, label, draft",
+        usage:
+          "bb gitlab mrs [host/group/project] [--state open|closed|merged|all] [--mine] " +
+          "[--author <user|@me>] [--assignee <user|@me>] [--label <name>]... [--draft] [--limit <n>] [--json]",
       },
       {
         name: "sync",
         summary: "Refresh the cache from GitLab now",
         usage: "bb gitlab sync",
       },
+      {
+        name: "show",
+        summary: "Show an issue or merge request live, with its comments",
+        usage: "bb gitlab show <host/group/project#iid | host/group/project!iid | URL> [--json]",
+      },
+      {
+        name: "comment",
+        summary: "Add a comment to an issue or merge request",
+        usage: "bb gitlab comment <host/group/project#iid | host/group/project!iid | URL> <text…>",
+      },
+      {
+        name: "pipeline",
+        summary: "Show a pipeline's status and jobs, with the tail of failed-job logs",
+        usage:
+          "bb gitlab pipeline [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
+          "[--logs <n>] [--json]",
+      },
+      {
+        name: "retry",
+        summary: "Retry a pipeline's failed jobs, or one job with --job",
+        usage:
+          "bb gitlab retry [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
+          "[--job <id|name>]",
+      },
+      {
+        name: "run",
+        summary: "Start a new pipeline on a branch or for a merge request",
+        usage: "bb gitlab run [project | MR] [--ref <branch>]",
+      },
     ],
-    async run(argv) {
-      const [sub, arg] = argv;
+    async run(argv, ctx) {
+      const command = parseGitlabCliArgs(argv);
+      if ("error" in command) {
+        return { exitCode: 1, stderr: `${command.error}\n${USAGE}` };
+      }
       try {
-        const validationError = validateGitlabCliArgs(argv);
-        if (validationError !== null) {
-          return { exitCode: 1, stderr: `${validationError}\n${USAGE}` };
-        }
-        if (sub === undefined || sub === "help" || sub === "--help") {
-          return { exitCode: 0, stdout: USAGE };
-        }
-        if (sub === "projects") {
-          const projects = await discoverProjects(true);
-          if (projects.length === 0) {
-            return {
-              exitCode: 0,
-              stdout:
+        let stdout: string;
+        switch (command.sub) {
+          case "help":
+            stdout = USAGE;
+            break;
+          case "projects": {
+            const projects = await discoverProjects(true);
+            if (command.json) {
+              stdout = JSON.stringify(projects, null, 2);
+            } else if (projects.length === 0) {
+              stdout =
                 "No tracked projects. Attach a BB project whose checkout has a GitLab " +
-                "origin remote, or set extraProjects.",
-            };
+                "origin remote, or set extraProjects.";
+            } else {
+              stdout = projects
+                .map(
+                  (entry) =>
+                    `${entry.project}${
+                      entry.bbProjectId !== null ? `\t(${entry.bbProjectId})` : ""
+                    }`,
+                )
+                .join("\n");
+            }
+            break;
           }
-          return {
-            exitCode: 0,
-            stdout: projects
-              .map(
-                (entry) =>
-                  `${entry.project}${
-                    entry.bbProjectId !== null ? `\t(${entry.bbProjectId})` : ""
-                  }`,
-              )
-              .join("\n"),
-          };
-        }
-        if (sub === "issues" || sub === "mrs") {
-          const kind = sub === "mrs" ? "mr" : "issue";
-          const marker = kind === "mr" ? "!" : "#";
-          const items = listCachedItems({
-            kind,
-            project: isProjectRef(arg) ? arg : undefined,
-            state: "open",
-          });
-          if (items.length === 0) {
-            return {
-              exitCode: 0,
-              stdout: "Nothing cached. Run `bb gitlab sync` first.",
-            };
+          case "issues":
+          case "mrs":
+            stdout = await cliList(command);
+            break;
+          case "sync": {
+            const { projects, items } = await syncAll(true);
+            stdout = `Synced ${items} item(s) across ${projects} project(s).`;
+            break;
           }
-          return {
-            exitCode: 0,
-            stdout: items
-              .map(
-                (item) =>
-                  `${item.project}${marker}${item.iid}\t[${
-                    item.draft ? "draft" : item.state
-                  }]\t${item.title}`,
-              )
-              .join("\n"),
-          };
+          case "show":
+            stdout = await cliShow(command.target, command.json, ctx);
+            break;
+          case "comment":
+            stdout = await cliComment(command.target, command.body, ctx);
+            break;
+          case "pipeline":
+            stdout = await cliPipeline(command, ctx);
+            break;
+          case "retry":
+            stdout = await cliRetry(command, ctx);
+            break;
+          case "run":
+            stdout = await cliRun(command, ctx);
+            break;
         }
-        if (sub === "sync") {
-          const { projects, items } = await syncAll(true);
-          return {
-            exitCode: 0,
-            stdout: `Synced ${items} item(s) across ${projects} project(s).`,
-          };
-        }
-        return {
-          exitCode: 1,
-          stderr: `Unknown subcommand "${sub}".\n${USAGE}`,
-        };
+        return { exitCode: 0, stdout: clipOutput(stdout) };
       } catch (error) {
         return {
           exitCode: 1,

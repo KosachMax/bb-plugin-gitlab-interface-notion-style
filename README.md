@@ -31,9 +31,23 @@ bb plugin install /path/to/bb-plugin-gitlab
 - **Mentions**: `#` completes GitLab issues, `!` completes merge requests (`@`
   does both); the selected item's title, state, and description are attached as
   agent context at send time.
-- **`bb gitlab` CLI**: `projects`, `issues [project]`, `mrs [project]`, `sync` —
-  also discoverable by agents through the plugin-commands skill, alongside the
-  bundled `gitlab` skill that teaches `glab` conventions.
+- **`bb gitlab` CLI**, also discoverable by agents through the plugin-commands
+  skill, alongside the bundled `gitlab` skill that teaches `glab` conventions:
+  - `projects`, `sync`
+  - `issues` / `mrs [project]` with `--state open|closed|merged|all`, `--mine`,
+    `--author`, `--assignee` (`@me` works), `--label` (repeatable), `--draft`,
+    `--limit`, `--json`
+  - `show <item>`: live issue/MR detail with comments; MRs add branches, merge
+    status, approvals, and pipeline
+  - `comment <item> <text…>`
+  - `pipeline [target]`: jobs plus the tail of each failed job's log
+    (`--ref`, `--pipeline`, `--logs <n>`, `--json`)
+  - `retry [target]`: re-run failed and canceled jobs, or one with `--job`
+  - `run [target]`: start a fresh pipeline for an MR or on `--ref`
+
+  An item is `host/group/app#7`, `host/group/app!12` (single-quote refs in a shell), or its
+  web URL. A target may also be a project or a pipeline/job URL; omitted, it is
+  the GitLab project of the BB project the command runs in.
 
 ## Auth and any GitLab domain
 
