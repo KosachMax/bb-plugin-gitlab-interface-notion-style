@@ -1,27 +1,67 @@
-# bb-plugin-gitlab
+# bb-plugin-gitlab (fork)
 
-GitLab issues and merge requests inside BB, with one-click agent dispatch.
-Self-managed instances are first-class: every host `glab` is logged into is a
-host this plugin can reach.
+GitLab issues and merge requests inside [BB](https://getbb.app), with one-click
+agent dispatch. Self-managed instances are first-class: every host `glab` is
+logged into is a host this plugin can reach.
+
+This is a fork of [suiramdev/bb-plugin-gitlab](https://github.com/suiramdev/bb-plugin-gitlab).
+It keeps the original panel, agent dispatch, and mentions, and adds a fuller
+`bb gitlab` CLI and a Notion-style interface.
+
+## What this fork adds
+
+- **A Notion-style panel.** Issues and merge requests are two views of one
+  table (hairline cells, hover-only row actions, COUNT footer); each item opens
+  as a page with a property block whose values are the editors. Filter pills
+  and search edit the same query string, so the old `is:open assignee:@me`
+  grammar still works.
+- **A fuller CLI**, usable by you and by agents: `show`, `comment`, `pipeline`
+  (jobs plus the tail of each failed job's log), `retry`, `run`, and filters on
+  `issues` / `mrs` (`--state`, `--mine`, `--author`, `--assignee`, `--label`,
+  `--draft`, `--limit`, `--json`). See [What it does](#what-it-does).
+- **Fixes.** Quick assignee or label toggles could send an empty list and
+  clear every value on GitLab; they no longer do.
+
+Not here yet: pipeline, job-log, and Retry/Run screens in the panel. Those are
+CLI-only for now.
+
+## Install
 
 ```sh
-bb plugin install /path/to/bb-plugin-gitlab
+bb plugin install git:https://github.com/KosachMax/bb-plugin-gitlab.git@cli-commands
 ```
+
+or from a local checkout, which is what you want while hacking on it:
+
+```sh
+git clone https://github.com/KosachMax/bb-plugin-gitlab.git
+cd bb-plugin-gitlab && npm install --include=dev && bb plugin build
+bb plugin install "$PWD"
+```
+
+## Relation to upstream
+
+The fork is based on upstream `v0.1.2`. Upstream has since split `server.ts`
+into modules and moved to GraphQL, so these changes are not a clean merge; they
+would need porting before an upstream pull request. The upstream license (MIT)
+and attribution are unchanged.
 
 ## What it does
 
-- **Sidebar panel** (GitLab tanuki, full width): Issues and Merge requests tabs
-  across every tracked project, one filter box that takes qualifiers —
-  `is:open`, `is:draft`, `assignee:@me`, `author:dana`, `label:"needs triage"`,
-  `project:gitlab.com/acme/web`, `no:assignee`, `no:label` — plus plain text,
-  completed from the loaded items and driven by the keyboard (↑/↓, Enter or Tab
-  to accept, Escape to dismiss). The query persists in localStorage.
-- **Issue detail**: markdown description, notes, comment box, state, assignee
-  and label editing, plus "Send agent". Deep-linkable through the URL hash:
+- **Sidebar panel** (GitLab tanuki, full width), shaped like a Notion database:
+  Issues and Merge requests view tabs over one table across every tracked
+  project, with filter pills (Status, Draft, Assignee, Author, Label, Project —
+  `Me` and `No assignee` / `No label` included) and an inline search. Pills and
+  search edit one query string in the same grammar as before — `is:open`,
+  `assignee:@me`, `label:"needs triage"`, `no:label` — so typing a qualifier
+  into search turns it into a pill. The query persists in localStorage.
+- **Issue page**: a Notion page — title, a property block whose value cells
+  edit state, assignees, and labels in place, page comments, the markdown
+  description, plus "Send agent". Deep-linkable through the URL hash:
   `#/issues/<host>/<namespace/path>/<iid>`.
-- **Merge-request detail**: source → target branch, mergeability, pipeline jobs,
-  approvals, reviewers, conversation notes, inline discussion threads, and
-  per-file diffs rendered by the same syntax-highlighting engine as the rest of
+- **Merge-request page**: source → target branch, mergeability, pipeline,
+  approvals, reviewers, and comments as properties, then Pipeline, Discussions,
+  and Changes as toggle sections with per-file diffs rendered by the same syntax-highlighting engine as the rest of
   BB, following the host's code theme. Deep-linkable as
   `#/merge_requests/<host>/<namespace/path>/<iid>`.
 - **Send agent / Review with agent**: spawns a BB worker thread on the issue (or
