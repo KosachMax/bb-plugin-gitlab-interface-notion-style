@@ -3,7 +3,12 @@ import {
   matchesItemQuery,
   parseItemQuery,
   queryProject,
+  queryText,
+  queryTokens,
   suggestQueryTokens,
+  withoutQualifiers,
+  withQualifier,
+  withQueryText,
   type QueryableItem,
 } from "./item-query";
 
@@ -165,5 +170,42 @@ describe("queryProject", () => {
     expect(queryProject(parseItemQuery("is:open"), ["gitlab.com/acme/web"])).toBe(
       null,
     );
+  });
+});
+
+describe("query editing", () => {
+  it("lists tokens with folded keys and unquoted values", () => {
+    expect(queryTokens('state:open label:"needs triage" login')).toEqual([
+      { key: "is", value: "open", raw: "state:open" },
+      { key: "label", value: "needs triage", raw: 'label:"needs triage"' },
+      { key: "", value: "login", raw: "login" },
+    ]);
+  });
+
+  it("adds a qualifier once and quotes values with spaces", () => {
+    const once = withQualifier("is:open ", "label", "needs triage");
+    expect(once).toBe('is:open label:"needs triage" ');
+    expect(withQualifier(once, "label", "Needs Triage")).toBe(once);
+    expect(parseItemQuery(once).labels).toEqual(["needs triage"]);
+  });
+
+  it("removes matching qualifiers and keeps text", () => {
+    expect(
+      withoutQualifiers("is:open is:draft login label:bug", (key, value) =>
+        key === "is" && value !== "draft",
+      ),
+    ).toBe("is:draft login label:bug ");
+    expect(withoutQualifiers("is:open", () => true)).toBe("");
+  });
+
+  it("edits the text part without touching qualifiers", () => {
+    expect(queryText("is:open login timeout label:bug")).toBe("login timeout");
+    expect(withQueryText("is:open login label:bug", "crash  report")).toBe(
+      "is:open label:bug crash report ",
+    );
+    expect(withQueryText("is:open login", "")).toBe("is:open ");
+    expect(parseItemQuery(withQueryText("", "assignee:@me oops")).assignees).toEqual([
+      "@me",
+    ]);
   });
 });

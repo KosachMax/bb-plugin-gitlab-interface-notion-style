@@ -1,26 +1,26 @@
 // bb-plugin-gitlab — the frontend bundle.
 //
-// A GitLab panel: Issues / Merge requests as a filterable list (project
-// filter, Open/Closed chips, "Assigned to me", text search — all pushed to
-// the backend's cache query), inline state + assignee editing, and detail
-// views for both kinds. The merge-request view is the deep one: overview
-// (source → target, draft, merge status, conflicts, churn), pipeline and its
-// jobs, approvals, reviewers, conversation notes, inline discussion threads,
-// and per-file diffs rendered by this plugin's own unified-diff component.
-// "Send agent" / "Review with agent" buttons sit wherever an issue or merge
-// request shows up, and every spawned thread comes back as a ⚡ pill.
+// A GitLab panel shaped like a Notion database. Issues and merge requests are
+// two views of one table: Notion's view tabs, a toolbar with filter pills and
+// search (both editing the one persisted query string), hairline-ruled rows
+// with hover-only actions, and a COUNT footer. Opening a row shows a Notion
+// page: breadcrumbs, a 40px title, a property block whose value cells are the
+// editors, page comments, then the description. Merge requests add Pipeline,
+// Discussions, and Changes as toggle sections, the diffs rendered by
+// @pierre/diffs in the host's code theme. "Send agent" / "Review with agent"
+// sit wherever an issue or merge request shows up, and every spawned thread
+// comes back as a ⚡ tag.
 //
 // Sub-navigation lives in the nav panel's subPath, so deep links are
 // #/issues/<host>/<namespace/path>/<iid> and
 // #/merge_requests/<host>/<namespace/path>/<iid> — parsed from the right
 // (last segment is the iid, first is the host, everything between is the
 // project path) so subgroups of any depth work. A threadPanelAction opens
-// the same merge-request view in a thread's right panel, auto-resolved to
+// the same merge-request page in a thread's right panel, auto-resolved to
 // that thread's merge request.
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -38,7 +38,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { gitlabRpcContract } from "./server";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -49,7 +48,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -58,23 +56,43 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/empty-state";
-import { PageBody } from "@/components/page-body";
+import {
+  Avatar,
+  Callout,
+  ChipButton,
+  colorForName,
+  EmptyValue,
+  FilterPill,
+  GhostButton,
+  Icon,
+  ICONS,
+  Person,
+  PrimaryButton,
+  PROPERTY_CONTROL_CLASS,
+  PropertyRow,
+  StatusPill,
+  Tag,
+  ToggleCaret,
+  ToggleSection,
+  ViewTab,
+  type NotionColor,
+} from "@/components/notion";
+import { cn } from "@/lib/utils";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   MARKER,
   matchesItemQuery,
   parseItemQuery,
-  QUALIFIER_KEYS,
   queryProject,
-  suggestQueryTokens,
+  queryText,
+  queryTokens,
+  withoutQualifiers,
+  withQualifier,
+  withQueryText,
   type Kind,
-  type ParsedItemQuery,
-  type QuerySuggestion,
-  type QueryVocabulary,
 } from "@/lib/item-query";
 
 // ---------------------------------------------------------------------------
@@ -446,117 +464,79 @@ function useItemMutations() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared bits.
+// Shared bits, in Notion's vocabulary (see components/notion.tsx).
 // ---------------------------------------------------------------------------
 
-/**
- * A username chip. GitLab avatars need an authenticated request on most
- * self-managed instances, so the panel draws initials from the theme's own
- * tokens instead of leaking requests to an instance it can't authenticate to.
- */
-function Avatar({
-  username,
-  size = "size-5",
-  className,
-}: {
-  username: string;
-  size?: string;
-  className?: string;
-}) {
-  const initials = username.slice(0, 2).toUpperCase();
-  return (
-    <span
-      title={username}
-      aria-hidden="true"
-      className={`${size} inline-flex shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-medium uppercase text-muted-foreground ${className ?? ""}`}
-    >
-      {initials}
-    </span>
-  );
-}
-
-function UserLine({ username }: { username: string }) {
-  return (
-    <p className="flex items-center gap-2 text-sm text-foreground">
-      <Avatar username={username} />
-      <span className="min-w-0 truncate">{username}</span>
-    </p>
-  );
-}
-
-function ChevronDownIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="shrink-0 opacity-50"
-      aria-hidden="true"
-    >
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
-}
-
-function RefreshIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      <path d="M21 12a9 9 0 0 0-15.2-6.5L3 8" />
-      <path d="M3 3v5h5" />
-      <path d="M3 12a9 9 0 0 0 15.2 6.5L21 16" />
-      <path d="M16 16h5v5" />
-    </svg>
-  );
-}
-
-/**
- * GitLab state → a theme-token dot. Draft is a separate boolean on GitLab, so
- * it wins the dot only while the merge request is still open.
- */
-function stateDotClass(state: string, draft = false): string {
-  if (state === "opened") {
-    return draft ? "bg-muted-foreground/60" : "bg-primary";
-  }
-  if (state === "merged") return "bg-foreground";
-  if (state === "locked") return "bg-muted-foreground";
-  return "bg-destructive";
-}
-
-function StateDot({ state, draft }: { state: string; draft?: boolean }) {
-  return (
-    <span
-      className={`size-2 shrink-0 rounded-full ${stateDotClass(state, draft)}`}
-    />
-  );
+/** GitLab state → a Notion status color. Draft wins only while still open. */
+function stateColor(state: string, draft = false): NotionColor {
+  if (state === "opened") return draft ? "default" : "green";
+  if (state === "merged") return "purple";
+  if (state === "locked") return "gray";
+  return "red";
 }
 
 function stateLabel(state: string, draft = false): string {
-  if (state === "opened") return draft ? "draft" : "open";
-  return state;
+  if (state === "opened") return draft ? "Draft" : "Open";
+  return state.charAt(0).toUpperCase() + state.slice(1);
 }
 
-function StateBadge({ state, draft }: { state: string; draft?: boolean }) {
+function StateStatus({ state, draft }: { state: string; draft?: boolean }) {
   return (
-    <Badge variant="outline" className="gap-1.5 font-normal">
-      <StateDot state={state} draft={draft} />
+    <StatusPill color={stateColor(state, draft)}>
       {stateLabel(state, draft)}
-    </Badge>
+    </StatusPill>
+  );
+}
+
+/** A GitLab pipeline or job status → a Notion status color. */
+function pipelineColor(status: string): NotionColor {
+  switch (status) {
+    case "success":
+      return "green";
+    case "failed":
+      return "red";
+    case "running":
+      return "blue";
+    case "pending":
+    case "created":
+    case "preparing":
+    case "scheduled":
+    case "waiting_for_resource":
+      return "yellow";
+    case "manual":
+      return "purple";
+    default:
+      // canceled, skipped, and whatever GitLab adds later
+      return "gray";
+  }
+}
+
+function PipelineStatus({ status }: { status: string }) {
+  const label = status.length > 0 ? status.replace(/_/g, " ") : "unknown";
+  return (
+    <StatusPill color={pipelineColor(status)} pulse={status === "running"}>
+      {label.charAt(0).toUpperCase() + label.slice(1)}
+    </StatusPill>
+  );
+}
+
+/** Multi-select labels: each label keeps one hue everywhere. */
+function LabelTags({ labels, max }: { labels: string[]; max?: number }) {
+  if (labels.length === 0) return null;
+  const shown = max === undefined ? labels : labels.slice(0, max);
+  return (
+    <>
+      {shown.map((label) => (
+        <Tag key={label} color={colorForName(label)} title={label}>
+          {label}
+        </Tag>
+      ))}
+      {max !== undefined && labels.length > max ? (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          +{labels.length - max}
+        </span>
+      ) : null}
+    </>
   );
 }
 
@@ -564,95 +544,122 @@ function ThreadPills({ links }: { links: ThreadLink[] | undefined }) {
   const navigate = useBbNavigate();
   if (links === undefined || links.length === 0) return null;
   return (
-    <span className="flex shrink-0 items-center gap-1">
+    <>
       {links.map((link, index) => (
-        <Badge
+        <button
           key={link.threadId}
+          type="button"
           title={`Open BB thread ${link.threadId}`}
           onClick={(event) => {
             event.stopPropagation();
             navigate.toThread(link.threadId);
           }}
-          variant="secondary"
-          className="cursor-pointer whitespace-nowrap hover:bg-accent"
+          className="inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded bg-yellow-500/30 px-1.5 text-sm leading-5 text-yellow-950 transition-opacity hover:opacity-80 [.dark_&]:bg-yellow-400/45 [.dark_&]:text-yellow-50"
         >
           ⚡ agent{links.length > 1 ? ` ${index + 1}` : ""}
-        </Badge>
+        </button>
       ))}
-    </span>
+    </>
   );
 }
 
-function LabelChips({
-  labels,
-  className,
-}: {
-  labels: string[];
-  className?: string;
-}) {
-  if (labels.length === 0) return null;
+function formatDateTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function PageSkeleton() {
   return (
-    <span className={`items-center gap-1 ${className ?? "flex shrink-0"}`}>
-      {labels.slice(0, 3).map((label) => (
-        <Badge
-          key={label}
-          variant="secondary"
-          className="font-normal text-muted-foreground"
+    <div className="flex flex-col gap-3 pt-14">
+      <Skeleton className="h-10 w-3/4" />
+      <div className="flex flex-col gap-2 pt-4">
+        {[0, 1, 2, 3].map((row) => (
+          <div key={row} className="flex gap-3">
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-5 w-48" />
+          </div>
+        ))}
+      </div>
+      <Skeleton className="mt-6 h-32 w-full" />
+    </div>
+  );
+}
+
+/** A Notion page comment: avatar, name, time, body (long ones fold). */
+function CommentItem({ note }: { note: Note }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  useEffect(() => {
+    const element = bodyRef.current;
+    if (element !== null) setOverflows(element.scrollHeight > element.clientHeight + 4);
+  }, [note.body]);
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <Avatar username={note.author} size={24} className="mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <p className="flex items-baseline gap-2 text-sm">
+          <span className="font-medium text-foreground">{note.author}</span>
+          <span
+            className="text-xs text-muted-foreground"
+            title={formatDateTime(note.createdAt)}
+          >
+            {relativeTime(note.createdAt)}
+          </span>
+        </p>
+        <div
+          ref={bodyRef}
+          className={cn(!expanded && "max-h-[7.5rem] overflow-hidden")}
         >
-          {label}
-        </Badge>
-      ))}
-    </span>
-  );
-}
-
-function SidebarHeading({ children }: { children: React.ReactNode }) {
-  return (
-    <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-      {children}
-    </h3>
-  );
-}
-
-function DetailSkeleton() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Skeleton className="h-4 w-40" />
-      <Skeleton className="h-7 w-2/3" />
-      <Skeleton className="h-32 w-full" />
+          <Markdown content={note.body} className="text-sm leading-relaxed" />
+        </div>
+        {overflows || expanded ? (
+          <button
+            type="button"
+            className="mt-0.5 rounded px-1 text-sm text-muted-foreground transition-colors -ml-1 hover:bg-state-hover hover:text-foreground"
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function NoteCard({ note }: { note: Note }) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-3">
-      <p className="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground">
-        <Avatar username={note.author} />
-        <span className="font-medium text-foreground">{note.author}</span> ·{" "}
-        {relativeTime(note.createdAt)}
-      </p>
-      <Markdown content={note.body} className="text-sm" />
-    </div>
-  );
-}
+/** Comments past this many fold behind "N more comments", newest kept. */
+const VISIBLE_COMMENTS = 3;
 
-function CommentBox({
+/**
+ * Page comments, where Notion keeps them: between the properties and the
+ * body. A one-line "Add a comment…" that grows; ⌘/Ctrl+Enter posts.
+ */
+function PageComments({
   method,
   project,
   iid,
+  notes,
   onPosted,
 }: {
   method: "commentIssue" | "commentMergeRequest";
   project: string;
   iid: number;
+  notes: Note[];
   onPosted: () => void;
 }) {
   const rpc = useRpc<typeof gitlabRpcContract>();
+  const viewer = useViewer();
   const [body, setBody] = useState("");
   const [posting, setPosting] = useState(false);
   const post = useCallback(() => {
-    if (body.trim().length === 0) return;
+    if (body.trim().length === 0 || posting) return;
     setPosting(true);
     rpc
       .call(method, { project, iid, body })
@@ -662,66 +669,213 @@ function CommentBox({
       })
       .catch((error: unknown) => toast.error(errorText(error)))
       .finally(() => setPosting(false));
-  }, [rpc, method, project, iid, body, onPosted]);
+  }, [rpc, method, project, iid, body, posting, onPosted]);
+  const ready = body.trim().length > 0;
+  const [showAll, setShowAll] = useState(false);
+  const hidden = showAll ? 0 : Math.max(0, notes.length - VISIBLE_COMMENTS);
   return (
-    <div className="flex flex-col gap-2">
-      <Textarea
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        placeholder="Write a comment…"
-        aria-label="New comment"
-        rows={3}
-      />
-      <div className="flex justify-end">
-        <Button
-          size="sm"
-          disabled={posting || body.trim().length === 0}
-          onClick={post}
+    <div className="flex flex-col gap-1">
+      {hidden > 0 ? (
+        <button
+          type="button"
+          className="flex h-7 items-center gap-1.5 self-start rounded-md px-1 text-sm text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+          onClick={() => setShowAll(true)}
         >
-          {posting ? "Posting…" : "Comment"}
-        </Button>
+          <Icon path={ICONS.comment} size={14} />
+          {hidden} more comment{hidden === 1 ? "" : "s"}
+        </button>
+      ) : null}
+      {notes.length > 0 ? (
+        <div className="flex flex-col">
+          {notes.slice(hidden).map((note, index) => (
+            <CommentItem key={`${note.createdAt}-${hidden + index}`} note={note} />
+          ))}
+        </div>
+      ) : null}
+      <div className="flex items-start gap-2 py-1.5">
+        <Avatar username={viewer ?? "me"} size={24} className="mt-0.5" />
+        <Textarea
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              post();
+            }
+          }}
+          placeholder="Add a comment…"
+          aria-label="New comment"
+          rows={ready ? 3 : 1}
+          className="min-h-6 flex-1 resize-none border-none bg-transparent px-0 py-0.5 text-sm leading-5 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+        />
+        {ready ? (
+          <PrimaryButton
+            className="h-6 px-2 text-xs"
+            disabled={posting}
+            onClick={post}
+            title="Post comment (⌘/Ctrl+Enter)"
+          >
+            {posting ? "Posting…" : "Comment"}
+          </PrimaryButton>
+        ) : null}
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// The filter bar: one query box — qualifiers (`is:`, `assignee:`, `author:`,
-// `label:`, `project:`, `no:`) plus plain text — with a keyboard-driven
-// completion list built from the loaded items.
-// ---------------------------------------------------------------------------
-
-function SuggestionIcon({ suggestion }: { suggestion: QuerySuggestion }) {
-  if (suggestion.state !== undefined) {
-    return <StateDot state={suggestion.state} draft={suggestion.draft} />;
-  }
-  if (suggestion.username !== undefined) {
-    return <Avatar username={suggestion.username} size="size-4" />;
-  }
-  return null;
+/** Notion's top bar on a page: breadcrumbs left, page actions right. */
+function PageTopBar({
+  crumbs,
+  actions,
+}: {
+  crumbs: Array<{ label: string; title?: string; onClick?: () => void }>;
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-9 items-center gap-0.5 text-sm">
+      {crumbs.map((crumb, index) => (
+        <span key={index} className="flex min-w-0 items-center gap-0.5">
+          {index > 0 ? (
+            <span className="px-0.5 text-muted-foreground/50">/</span>
+          ) : null}
+          {crumb.onClick !== undefined ? (
+            <button
+              type="button"
+              onClick={crumb.onClick}
+              title={crumb.title}
+              className="min-w-0 truncate rounded-md px-1.5 py-0.5 text-foreground/80 transition-colors hover:bg-state-hover hover:text-foreground"
+            >
+              {crumb.label}
+            </button>
+          ) : (
+            <span
+              title={crumb.title}
+              className="min-w-0 truncate px-1.5 py-0.5 text-foreground"
+            >
+              {crumb.label}
+            </span>
+          )}
+        </span>
+      ))}
+      <span className="flex-1" />
+      {actions}
+    </div>
+  );
 }
 
-function FilterBar({
-  kind,
-  projects,
-  items,
-  value,
-  onChange,
-}: {
-  kind: Kind;
-  projects: ProjectInfo[];
-  items: Item[] | null;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const viewer = useViewer();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listId = useId();
-  const [open, setOpen] = useState(false);
-  const [caret, setCaret] = useState(value.length);
-  const [highlight, setHighlight] = useState(0);
+/** "⋯" page menu: open on GitLab, copy link. */
+function PageMoreMenu({ url }: { url: string }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <GhostButton aria-label="More page actions" className="w-7 justify-center px-0">
+          <Icon path={ICONS.more} />
+        </GhostButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => window.open(url, "_blank")}>
+          Open in GitLab ↗
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => {
+            navigator.clipboard.writeText(url).then(
+              () => toast.success("Link copied"),
+              () => toast.error("Could not copy the link"),
+            );
+          }}
+        >
+          Copy link
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
-  const vocab = useMemo<QueryVocabulary>(() => {
+/** The page's body text, at Notion's 16px reading size. */
+function PageBody16({ body }: { body: string }) {
+  return body.length > 0 ? (
+    <Markdown
+      content={body}
+      className="text-base leading-normal [&_h1]:mt-8 [&_h1]:text-[1.875em] [&_h1]:font-semibold [&_h2]:mt-6 [&_h2]:text-[1.5em] [&_h2]:font-semibold [&_h3]:mt-4 [&_h3]:text-[1.25em] [&_h3]:font-semibold [&_h4]:text-[1em] [&_h4]:font-semibold"
+    />
+  ) : (
+    <p className="text-base text-muted-foreground/50">No description.</p>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The database view: view tabs, a toolbar (filter, search, New), filter
+// pills, and a Notion table. Pills and search both edit the one query string
+// through lib/item-query, so the filter persists exactly as it always has.
+// ---------------------------------------------------------------------------
+
+type FilterKey = "is" | "draft" | "assignee" | "author" | "label" | "project";
+
+interface FilterOption {
+  /** The qualifier this option writes, e.g. `["is", "open"]`. */
+  key: string;
+  value: string;
+  label: string;
+  /** How the option draws in the menu; defaults to its label. */
+  content?: React.ReactNode;
+}
+
+const FILTER_TITLES: Record<FilterKey, string> = {
+  is: "Status",
+  draft: "Draft",
+  assignee: "Assignee",
+  author: "Author",
+  label: "Label",
+  project: "Project",
+};
+
+const FILTER_ICONS: Record<FilterKey, string> = {
+  is: ICONS.status,
+  draft: ICONS.page,
+  assignee: ICONS.user,
+  author: ICONS.user,
+  label: ICONS.list,
+  project: ICONS.folder,
+};
+
+/** Which query tokens belong to a pill. `no:` rides with its property. */
+function tokenBelongsTo(filter: FilterKey, key: string, value: string): boolean {
+  const word = value.toLowerCase();
+  switch (filter) {
+    case "is":
+      return key === "is" && word !== "draft";
+    case "draft":
+      return key === "is" && word === "draft";
+    case "assignee":
+      return key === "assignee" || (key === "no" && word === "assignee");
+    case "label":
+      return key === "label" || (key === "no" && word === "label");
+    default:
+      return key === filter;
+  }
+}
+
+/** The state words a pill offers, in GitLab's own order. */
+const STATE_OPTIONS: Record<Kind, Array<{ value: string; state: string }>> = {
+  issue: [
+    { value: "open", state: "opened" },
+    { value: "closed", state: "closed" },
+  ],
+  mr: [
+    { value: "open", state: "opened" },
+    { value: "merged", state: "merged" },
+    { value: "closed", state: "closed" },
+    { value: "locked", state: "locked" },
+  ],
+};
+
+function useFilterOptions(
+  kind: Kind,
+  items: Item[] | null,
+  projects: ProjectInfo[],
+): Record<FilterKey, FilterOption[]> {
+  const viewer = useViewer();
+  return useMemo(() => {
     const users = new Set<string>();
     const labels = new Set<string>();
     for (const item of items ?? []) {
@@ -729,219 +883,372 @@ function FilterBar({
       for (const username of item.assignees) users.add(username);
       for (const label of item.labels) labels.add(label);
     }
+    const people = [...users]
+      .filter((username) => username !== viewer)
+      .sort((a, b) => a.localeCompare(b));
+    const me: FilterOption[] =
+      viewer === null
+        ? []
+        : [
+            {
+              key: "",
+              value: "@me",
+              label: "Me",
+              content: <Person username={`${viewer} (me)`} />,
+            },
+          ];
+    const asPeople = (key: string): FilterOption[] => [
+      ...me.map((option) => ({ ...option, key })),
+      ...people.map((username) => ({
+        key,
+        value: username,
+        label: username,
+        content: <Person username={username} />,
+      })),
+    ];
     return {
-      users: [...users].sort((a, b) => a.localeCompare(b)),
-      labels: [...labels].sort((a, b) => a.localeCompare(b)),
-      projects: projects.map((entry) => entry.project),
+      is: STATE_OPTIONS[kind].map((option) => ({
+        key: "is",
+        value: option.value,
+        label: stateLabel(option.state),
+        content: <StateStatus state={option.state} />,
+      })),
+      draft: [{ key: "is", value: "draft", label: "Draft only" }],
+      assignee: [
+        { key: "no", value: "assignee", label: "No assignee" },
+        ...asPeople("assignee"),
+      ],
+      author: asPeople("author"),
+      label: [
+        { key: "no", value: "label", label: "No label" },
+        ...[...labels]
+          .sort((a, b) => a.localeCompare(b))
+          .map((label) => ({
+            key: "label",
+            value: label,
+            label,
+            content: <Tag color={colorForName(label)}>{label}</Tag>,
+          })),
+      ],
+      project: projects.map((entry) => ({
+        key: "project",
+        value: entry.project,
+        label: shortProject(entry.project),
+      })),
     };
-  }, [items, projects]);
+  }, [kind, items, projects, viewer]);
+}
 
-  // The token under the caret is what gets completed, so a qualifier can be
-  // fixed mid-query instead of only at the end.
-  const upToCaret = value.slice(0, caret);
-  const tokenStart = upToCaret.lastIndexOf(" ") + 1;
-  const token = upToCaret.slice(tokenStart);
-  const suggestions = useMemo(
-    () => suggestQueryTokens(token, vocab, kind, viewer).slice(0, 8),
-    [token, vocab, kind, viewer],
+function FilterPillMenu({
+  filter,
+  query,
+  onQuery,
+  options,
+  defaultOpen,
+  onClosed,
+}: {
+  filter: FilterKey;
+  query: string;
+  onQuery: (query: string) => void;
+  options: FilterOption[];
+  defaultOpen: boolean;
+  onClosed: () => void;
+}) {
+  const tokens = queryTokens(query).filter((token) =>
+    tokenBelongsTo(filter, token.key, token.value),
   );
-  const active = Math.min(highlight, Math.max(0, suggestions.length - 1));
-
-  const accept = (suggestion: QuerySuggestion) => {
-    onChange(value.slice(0, tokenStart) + suggestion.insert + value.slice(caret));
-    const position = tokenStart + suggestion.insert.length;
-    setCaret(position);
-    setHighlight(0);
-    // The re-render owns the value, so the caret can only be placed after it.
-    requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.setSelectionRange(position, position);
-    });
+  const selected = new Set(
+    tokens.map((token) => `${token.key}:${token.value.toLowerCase()}`),
+  );
+  const isSelected = (option: FilterOption) =>
+    selected.has(`${option.key}:${option.value.toLowerCase()}`);
+  const chosen = options.filter(isSelected);
+  // A value typed by hand that no option lists (an old username, say).
+  const extra = tokens.filter(
+    (token) =>
+      !options.some(
+        (option) =>
+          option.key === token.key &&
+          option.value.toLowerCase() === token.value.toLowerCase(),
+      ),
+  );
+  const summary = [
+    ...chosen.map((option) => option.label),
+    ...extra.map((token) => token.value),
+  ];
+  const toggle = (option: FilterOption, on: boolean) => {
+    onQuery(
+      on
+        ? withQualifier(query, option.key, option.value)
+        : withoutQualifiers(
+            query,
+            (key, value) =>
+              key === option.key &&
+              value.toLowerCase() === option.value.toLowerCase(),
+          ),
+    );
   };
-
-  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Escape") {
-      setOpen(false);
-      return;
-    }
-    if (!open || suggestions.length === 0) {
-      if (event.key === "ArrowDown") setOpen(true);
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setHighlight((active + 1) % suggestions.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setHighlight((active - 1 + suggestions.length) % suggestions.length);
-    } else if (event.key === "Enter" || event.key === "Tab") {
-      event.preventDefault();
-      accept(suggestions[active]);
-    }
-  };
-
-  const listOpen = open && suggestions.length > 0;
-  const noun = kind === "mr" ? "merge requests" : "issues";
+  const title = FILTER_TITLES[filter];
   return (
-    <div className="relative">
-      <Input
-        ref={inputRef}
-        value={value}
-        onChange={(event) => {
-          onChange(event.target.value);
-          setOpen(true);
-          setHighlight(0);
-          setCaret(event.target.selectionStart ?? event.target.value.length);
-        }}
-        onSelect={() =>
-          setCaret(inputRef.current?.selectionStart ?? value.length)
-        }
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={onKeyDown}
-        placeholder="Filter — is:open assignee:@me label:bug, or plain text"
-        aria-label={`Filter ${noun}`}
-        role="combobox"
-        aria-expanded={listOpen}
-        aria-autocomplete="list"
-        aria-controls={listOpen ? listId : undefined}
-        aria-activedescendant={listOpen ? `${listId}-${active}` : undefined}
-        className="h-9 pr-8 text-sm"
-        spellCheck={false}
-      />
-      {value.length > 0 ? (
-        <button
-          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
-          onMouseDown={(event) => {
-            // mousedown, not click: blurring the input would close the list
-            // before the clear ever lands.
-            event.preventDefault();
-            onChange("");
-            setCaret(0);
-            inputRef.current?.focus();
-          }}
-          aria-label="Clear filter"
+    <DropdownMenu
+      defaultOpen={defaultOpen}
+      onOpenChange={(open) => {
+        if (!open) onClosed();
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <FilterPill active={summary.length > 0}>
+          <Icon path={FILTER_ICONS[filter]} size={14} />
+          <span className="min-w-0 truncate">
+            {filter === "draft"
+              ? "Draft only"
+              : summary.length > 0
+                ? `${title}: ${summary.join(", ")}`
+                : title}
+          </span>
+        </FilterPill>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-80 w-60 overflow-y-auto">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          {title}
+        </DropdownMenuLabel>
+        {options.map((option) => (
+          <DropdownMenuCheckboxItem
+            key={`${option.key}:${option.value}`}
+            checked={isSelected(option)}
+            onCheckedChange={(checked) => toggle(option, checked === true)}
+            onSelect={(event) => event.preventDefault()}
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              {option.content ?? <span className="truncate">{option.label}</span>}
+            </span>
+          </DropdownMenuCheckboxItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="text-muted-foreground"
+          onSelect={() =>
+            onQuery(
+              withoutQualifiers(query, (key, value) =>
+                tokenBelongsTo(filter, key, value),
+              ),
+            )
+          }
         >
-          ✕
-        </button>
+          Delete filter
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function FilterBar({
+  kind,
+  items,
+  projects,
+  query,
+  onQuery,
+}: {
+  kind: Kind;
+  items: Item[] | null;
+  projects: ProjectInfo[];
+  query: string;
+  onQuery: (query: string) => void;
+}) {
+  const options = useFilterOptions(kind, items, projects);
+  // A pill added from "+ Filter" shows (and opens) before it has a value.
+  const [pending, setPending] = useState<FilterKey | null>(null);
+  const available: FilterKey[] = [
+    "is",
+    ...(kind === "mr" ? (["draft"] as const) : []),
+    "assignee",
+    "author",
+    "label",
+    ...(projects.length > 1 ? (["project"] as const) : []),
+  ];
+  const tokens = queryTokens(query);
+  const shown = available.filter(
+    (filter) =>
+      filter === pending ||
+      tokens.some((token) => tokenBelongsTo(filter, token.key, token.value)),
+  );
+  const addable = available.filter((filter) => !shown.includes(filter));
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {shown.map((filter) =>
+        filter === "draft" ? (
+          <FilterPill
+            key={filter}
+            active
+            onClick={() =>
+              onQuery(
+                withoutQualifiers(query, (key, value) =>
+                  tokenBelongsTo("draft", key, value),
+                ),
+              )
+            }
+            title="Remove the draft filter"
+          >
+            <Icon path={FILTER_ICONS.draft} size={14} />
+            Draft only
+          </FilterPill>
+        ) : (
+          <FilterPillMenu
+            key={filter}
+            filter={filter}
+            query={query}
+            onQuery={onQuery}
+            options={options[filter]}
+            defaultOpen={filter === pending}
+            onClosed={() => setPending(null)}
+          />
+        ),
+      )}
+      {addable.length > 0 ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <GhostButton className="h-7 rounded-full px-2">
+              <Icon path={ICONS.plus} size={14} />
+              Filter
+            </GhostButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-48">
+            {addable.map((filter) => (
+              <DropdownMenuItem
+                key={filter}
+                onSelect={() => {
+                  if (filter === "draft") {
+                    onQuery(withQualifier(query, "is", "draft"));
+                  } else {
+                    setPending(filter);
+                  }
+                }}
+              >
+                <Icon path={FILTER_ICONS[filter]} className="text-muted-foreground" />
+                {filter === "draft" ? "Draft only" : FILTER_TITLES[filter]}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       ) : null}
-      {listOpen ? (
-        <div
-          id={listId}
-          role="listbox"
-          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-md"
+      {shown.length > 0 ? (
+        <GhostButton
+          className="h-7 px-2 text-sm"
+          onClick={() => {
+            setPending(null);
+            // Back to the default view (open items), keeping the search text.
+            onQuery(withQueryText(DEFAULT_QUERY, queryText(query)));
+          }}
         >
-          {suggestions.map((suggestion, index) => (
-            <button
-              key={suggestion.insert}
-              id={`${listId}-${index}`}
-              role="option"
-              aria-selected={index === active}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
-                index === active
-                  ? "bg-accent text-accent-foreground"
-                  : "text-popover-foreground"
-              }`}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                accept(suggestion);
-              }}
-              onMouseEnter={() => setHighlight(index)}
-            >
-              <SuggestionIcon suggestion={suggestion} />
-              <span className="min-w-0 truncate font-medium">
-                {suggestion.label}
-              </span>
-              {suggestion.hint !== undefined ? (
-                <span className="ml-auto shrink-0 pl-4 text-xs text-muted-foreground">
-                  {suggestion.hint}
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
+          Reset
+        </GhostButton>
       ) : null}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// The list.
-// ---------------------------------------------------------------------------
-
-// Shared column widths so the header row lines up with item rows. The list
-// switches modes against its own width, not the browser viewport.
-const COL = {
-  id: "shrink-0 @[48rem]:w-14",
-  assignee: "shrink-0 @[48rem]:w-20",
-  status: "shrink-0 @[48rem]:w-24",
-  updated: "hidden w-14 shrink-0 text-right @[48rem]:block",
-  actions:
-    "ml-auto flex shrink-0 items-center justify-end gap-1 @[48rem]:ml-0 @[48rem]:w-28",
-} as const;
-
-function AssigneeCell({ assignees }: { assignees: string[] }) {
-  if (assignees.length === 0) {
-    return <span className="text-muted-foreground/50">—</span>;
+/** Notion's toolbar search: an icon that opens into an inline field. */
+function SearchBox({
+  query,
+  onQuery,
+}: {
+  query: string;
+  onQuery: (query: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const text = queryText(query);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [open, setOpen] = useState(text.length > 0);
+  const value = draft ?? text;
+  if (!open && text.length === 0) {
+    return (
+      <GhostButton
+        aria-label="Search"
+        className="w-7 justify-center px-0"
+        onClick={() => {
+          setOpen(true);
+          requestAnimationFrame(() => inputRef.current?.focus());
+        }}
+      >
+        <Icon path={ICONS.search} />
+      </GhostButton>
+    );
   }
   return (
-    <span
-      className="flex items-center -space-x-1.5"
-      title={assignees.join(", ")}
-    >
-      {assignees.slice(0, 3).map((username) => (
-        <Avatar key={username} username={username} className="ring-1 ring-card" />
-      ))}
-      {assignees.length > 3 ? (
-        <span className="pl-2.5 text-xs text-muted-foreground">
-          +{assignees.length - 3}
-        </span>
+    <span className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground">
+      <Icon path={ICONS.search} />
+      <input
+        ref={inputRef}
+        autoFocus
+        value={value}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          onQuery(withQueryText(query, event.target.value));
+        }}
+        onBlur={() => {
+          setDraft(null);
+          if (queryText(query).length === 0) setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setDraft(null);
+            onQuery(withQueryText(query, ""));
+            setOpen(false);
+          }
+        }}
+        placeholder="Type to search…"
+        aria-label="Search"
+        spellCheck={false}
+        className="w-44 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+      />
+      {value.length > 0 ? (
+        <button
+          type="button"
+          aria-label="Clear search"
+          className="rounded text-muted-foreground hover:text-foreground"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            setDraft(null);
+            onQuery(withQueryText(query, ""));
+          }}
+        >
+          <Icon path={ICONS.close} size={14} />
+        </button>
       ) : null}
     </span>
   );
 }
 
-/** Inline state control: a dropdown for issues, a badge for merge requests. */
-function StatusCell({ item }: { item: Item }) {
-  const { setIssueState } = useItemMutations();
-  const [pending, setPending] = useState(false);
-  if (item.kind === "mr") {
-    return <StateBadge state={item.state} draft={item.draft} />;
-  }
-  const change = (next: "open" | "closed") => {
-    if ((item.state === "opened") === (next === "open")) return;
-    setPending(true);
-    setIssueState(item.project, item.iid, next)
-      .catch((error: unknown) => toast.error(errorText(error)))
-      .finally(() => setPending(false));
-  };
+// ---------------------------------------------------------------------------
+// The table. Fixed column widths with hairline cell rules, a title column
+// that grows, hover-only row actions, and a COUNT footer under the title.
+// Narrow panels scroll the table sideways, as Notion does.
+// ---------------------------------------------------------------------------
+
+const CELL = "h-9 border-r border-border/70 px-2 align-middle last:border-r-0";
+
+function HeaderCell({
+  icon,
+  children,
+  className,
+}: {
+  icon: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={pending}>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 gap-1.5 px-2 text-xs font-normal"
-          onClick={(event) => event.stopPropagation()}
-          aria-label={`Change issue #${item.iid} state, currently ${stateLabel(item.state)}`}
-          aria-busy={pending}
-        >
-          <StateDot state={item.state} />
-          <span>{pending ? "…" : stateLabel(item.state)}</span>
-          <ChevronDownIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        <DropdownMenuItem onSelect={() => change("open")}>
-          <StateDot state="opened" />
-          Open
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => change("closed")}>
-          <StateDot state="closed" />
-          Closed
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <th
+      scope="col"
+      className={cn(
+        "h-9 px-2 text-left align-middle text-sm font-normal text-muted-foreground",
+        className,
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Icon path={icon} />
+        <span className="truncate">{children}</span>
+      </span>
+    </th>
   );
 }
 
@@ -968,17 +1275,15 @@ function RowMenu({ item }: { item: Item }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-7 text-muted-foreground"
+        <ChipButton
           aria-label={`More actions for ${ref}`}
+          className="w-6 justify-center px-0"
           onClick={(event) => event.stopPropagation()}
         >
-          ⋮
-        </Button>
+          <Icon path={ICONS.more} size={14} />
+        </ChipButton>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
         {item.kind === "issue" && viewer !== null ? (
           <DropdownMenuItem onSelect={toggleSelfAssign}>
             {assignedToMe ? "Unassign me" : "Assign to me"}
@@ -999,7 +1304,7 @@ function RowMenu({ item }: { item: Item }) {
         ) : null}
         {item.kind === "issue" ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => window.open(item.url, "_blank")}>
-          Open on GitLab ↗
+          Open in GitLab ↗
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => {
@@ -1016,750 +1321,365 @@ function RowMenu({ item }: { item: Item }) {
   );
 }
 
+/** Inline state control for issues; merge requests change state on GitLab. */
+function StatusCell({ item }: { item: Item }) {
+  const { setIssueState } = useItemMutations();
+  const [pending, setPending] = useState(false);
+  if (item.kind === "mr") {
+    return <StateStatus state={item.state} draft={item.draft} />;
+  }
+  const change = (next: "open" | "closed") => {
+    if ((item.state === "opened") === (next === "open")) return;
+    setPending(true);
+    setIssueState(item.project, item.iid, next)
+      .catch((error: unknown) => toast.error(errorText(error)))
+      .finally(() => setPending(false));
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={pending}>
+        <button
+          type="button"
+          className="rounded-full transition-opacity hover:opacity-80 disabled:opacity-50"
+          onClick={(event) => event.stopPropagation()}
+          aria-label={`Change issue #${item.iid} state, currently ${stateLabel(item.state)}`}
+          aria-busy={pending}
+        >
+          <StateStatus state={item.state} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" onClick={(event) => event.stopPropagation()}>
+        <DropdownMenuItem onSelect={() => change("open")}>
+          <StateStatus state="opened" />
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => change("closed")}>
+          <StateStatus state="closed" />
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function ItemRow({
   item,
   links,
+  showProject,
   onOpen,
 }: {
   item: Item;
   links: ThreadLink[] | undefined;
+  showProject: boolean;
   onOpen: () => void;
 }) {
   const { spawn, spawningKey } = useSpawn();
   const busy = spawningKey === linkKey(item.kind, item.project, item.iid);
   return (
-    <div
-      className="grid cursor-pointer grid-cols-1 gap-y-2 px-3 py-3 hover:bg-accent/50 @[48rem]:flex @[48rem]:items-center @[48rem]:gap-3 @[48rem]:py-2"
+    <tr
+      className="group cursor-pointer border-b border-border/70 outline-none focus-visible:bg-state-hover"
+      tabIndex={0}
       onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && event.target === event.currentTarget) onOpen();
+      }}
     >
-      <span className="flex min-w-0 flex-col items-start gap-1.5 @[48rem]:order-2 @[48rem]:flex-1 @[48rem]:flex-row @[48rem]:items-center @[48rem]:gap-2">
-        <span className="min-w-0 flex-1 line-clamp-3 text-sm font-medium leading-snug text-foreground @[48rem]:line-clamp-1 @[48rem]:leading-normal">
-          {item.title}
+      <td className={cn(CELL, "relative")}>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate font-medium text-foreground">
+            {item.title}
+          </span>
+          <ThreadPills links={links} />
         </span>
-        <span
-          className="shrink-0 truncate text-xs text-muted-foreground"
-          title={item.project}
-        >
-          {shortProject(item.project)}
-        </span>
-        <LabelChips
-          labels={item.labels}
-          className="hidden shrink-0 @[60rem]:flex"
-        />
-        <ThreadPills links={links} />
-      </span>
-      <span className="flex min-w-0 items-center gap-2 @[48rem]:contents">
-        <span
-          className={`${COL.id} font-mono text-xs text-muted-foreground @[48rem]:order-1`}
-        >
-          {MARKER[item.kind]}
-          {item.iid}
-        </span>
-        <span
-          className={`${COL.assignee} ${item.assignees.length === 0 ? "hidden @[48rem]:flex" : "flex"} items-center gap-1 text-xs text-muted-foreground @[48rem]:order-3`}
-          title={`opened by ${item.author}`}
-        >
-          <AssigneeCell assignees={item.assignees} />
-        </span>
-        <span className={`${COL.status} @[48rem]:order-4`}>
-          <StatusCell item={item} />
-        </span>
-        <span
-          className={`${COL.updated} text-xs text-muted-foreground @[48rem]:order-5`}
-        >
-          {relativeTime(item.updatedAt)}
-        </span>
-        <span className={`${COL.actions} @[48rem]:order-6`}>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7"
+        <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1 bg-background pl-1 pr-1.5 opacity-0 shadow-[-12px_0_8px_-4px_var(--background)] group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100">
+          <ChipButton
             disabled={spawningKey !== null}
+            title={item.kind === "issue" ? "Send agent" : "Review with agent"}
             aria-label={
               item.kind === "issue"
                 ? `Send agent to issue #${item.iid}`
                 : `Review merge request !${item.iid} with an agent`
             }
+            className="w-6 justify-center px-0 text-sm"
             onClick={(event) => {
               event.stopPropagation();
               spawn(item.kind, item.project, item.iid);
             }}
           >
-            {busy ? "…" : item.kind === "issue" ? "Send agent" : "Review"}
-          </Button>
+            {busy ? "…" : "⚡"}
+          </ChipButton>
+          <ChipButton
+            aria-label={`Open ${MARKER[item.kind]}${item.iid}`}
+            className="gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-[0.06em]"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen();
+            }}
+          >
+            <Icon path={ICONS.peek} size={13} />
+            Open
+          </ChipButton>
           <RowMenu item={item} />
         </span>
-      </span>
-    </div>
-  );
-}
-
-function ListSkeleton() {
-  return (
-    <div className="divide-y divide-border">
-      {[0, 1, 2, 3].map((row) => (
-        <div
-          key={row}
-          className="grid grid-cols-1 gap-y-3 px-3 py-3 @[48rem]:flex @[48rem]:items-center @[48rem]:gap-3"
-        >
-          <Skeleton className="h-3 w-4/5 @[48rem]:order-2 @[48rem]:flex-1" />
-          <span className="flex items-center gap-2 @[48rem]:contents">
-            <span className={`${COL.id} @[48rem]:order-1`}>
-              <Skeleton className="h-3 w-10" />
-            </span>
-            <span className={`${COL.assignee} flex @[48rem]:order-3`}>
-              <Skeleton className="size-5 rounded-full @[48rem]:h-3 @[48rem]:w-16" />
-            </span>
-            <span className={`${COL.status} @[48rem]:order-4`}>
-              <Skeleton className="h-3 w-16" />
-            </span>
-            <span className={`${COL.updated} @[48rem]:order-5`}>
-              <Skeleton className="ml-auto h-3 w-12" />
-            </span>
-            <span className={`${COL.actions} @[48rem]:order-6`}>
-              <Skeleton className="h-7 w-24" />
-            </span>
+      </td>
+      <td className={cn(CELL, "text-muted-foreground")}>
+        {MARKER[item.kind]}
+        {item.iid}
+      </td>
+      <td className={CELL}>
+        <StatusCell item={item} />
+      </td>
+      <td className={CELL} title={item.assignees.join(", ")}>
+        {item.assignees.length > 0 ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Person username={item.assignees[0]} />
+            {item.assignees.length > 1 ? (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                +{item.assignees.length - 1}
+              </span>
+            ) : null}
           </span>
-        </div>
-      ))}
-    </div>
+        ) : null}
+      </td>
+      <td className={CELL}>
+        <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+          <LabelTags labels={item.labels} max={3} />
+        </span>
+      </td>
+      {showProject ? (
+        <td className={cn(CELL, "truncate")} title={item.project}>
+          {shortProject(item.project)}
+        </td>
+      ) : null}
+      <td
+        className={cn(CELL, "whitespace-nowrap text-foreground")}
+        title={formatDateTime(item.updatedAt)}
+      >
+        {relativeTime(item.updatedAt)}
+      </td>
+    </tr>
   );
 }
 
-function ItemsList({
+function ItemsTable({
   kind,
   items,
   error,
   hasFilter,
+  showProject,
   onOpenItem,
+  onNew,
 }: {
   kind: Kind;
   items: Item[] | null;
   error: string | null;
   hasFilter: boolean;
+  showProject: boolean;
   onOpenItem: (project: string, iid: number) => void;
+  onNew?: () => void;
 }) {
   const links = useLinks();
   const noun = kind === "mr" ? "merge requests" : "issues";
+  const columns = showProject ? 7 : 6;
 
-  let body: React.ReactNode;
+  let rows: React.ReactNode;
   if (error !== null) {
-    body = <EmptyState message={error} />;
+    rows = (
+      <tr>
+        <td colSpan={columns} className="py-4">
+          <Callout icon="⚠️">{error}</Callout>
+        </td>
+      </tr>
+    );
   } else if (items === null) {
-    body = <ListSkeleton />;
+    rows = [0, 1, 2, 3, 4].map((row) => (
+      <tr key={row} className="border-b border-border/70">
+        {Array.from({ length: columns }, (_, cell) => (
+          <td key={cell} className={CELL}>
+            <Skeleton className={cell === 0 ? "h-3.5 w-3/4" : "h-3.5 w-2/3"} />
+          </td>
+        ))}
+      </tr>
+    ));
   } else if (items.length === 0) {
-    body = (
-      <EmptyState
-        message={
-          hasFilter
-            ? `No ${noun} match this filter.`
-            : `No ${noun} in the tracked projects.`
-        }
-      />
+    rows = (
+      <tr className="border-b border-border/70">
+        <td colSpan={columns} className="h-9 px-2 text-sm text-muted-foreground">
+          {hasFilter ? `No ${noun} match these filters.` : `No ${noun} yet.`}
+        </td>
+      </tr>
     );
   } else {
-    body = (
-      <div className="divide-y divide-border">
-        {items.map((item) => (
-          <ItemRow
-            key={linkKey(item.kind, item.project, item.iid)}
-            item={item}
-            links={links[linkKey(kind, item.project, item.iid)]}
-            onOpen={() => onOpenItem(item.project, item.iid)}
-          />
-        ))}
-      </div>
-    );
+    rows = items.map((item) => (
+      <ItemRow
+        key={linkKey(item.kind, item.project, item.iid)}
+        item={item}
+        links={links[linkKey(kind, item.project, item.iid)]}
+        showProject={showProject}
+        onOpen={() => onOpenItem(item.project, item.iid)}
+      />
+    ));
   }
 
   return (
-    <div className="@container overflow-hidden rounded-lg border border-border bg-card">
-      <div className="hidden items-center gap-3 border-b border-border bg-muted/50 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground @[48rem]:flex">
-        <span className={COL.id}>{kind === "mr" ? "MR" : "Issue"}</span>
-        <span className="min-w-0 flex-1">Title</span>
-        <span className={COL.assignee}>Assignees</span>
-        <span className={COL.status}>State</span>
-        <span className={COL.updated}>Updated</span>
-        <span className={COL.actions} />
-      </div>
-      {body}
+    <div className="overflow-x-auto">
+      <table
+        className={cn(
+          "w-full table-fixed border-collapse text-sm",
+          showProject ? "min-w-[1060px]" : "min-w-[900px]",
+        )}
+      >
+        <colgroup>
+          <col />
+          <col className="w-[76px]" />
+          <col className="w-[104px]" />
+          <col className="w-[170px]" />
+          <col className="w-[200px]" />
+          {showProject ? <col className="w-[150px]" /> : null}
+          <col className="w-[96px]" />
+        </colgroup>
+        <thead>
+          <tr className="border-b border-border/70">
+            <HeaderCell icon={ICONS.title}>Name</HeaderCell>
+            <HeaderCell icon={ICONS.hash}>ID</HeaderCell>
+            <HeaderCell icon={ICONS.status}>Status</HeaderCell>
+            <HeaderCell icon={ICONS.users}>Assignee</HeaderCell>
+            <HeaderCell icon={ICONS.list}>Labels</HeaderCell>
+            {showProject ? (
+              <HeaderCell icon={ICONS.folder}>Project</HeaderCell>
+            ) : null}
+            <HeaderCell icon={ICONS.clock}>Updated</HeaderCell>
+          </tr>
+        </thead>
+        <tbody>
+          {rows}
+          {onNew !== undefined ? (
+            <tr
+              className="cursor-pointer border-b border-border/70 text-muted-foreground transition-colors hover:bg-state-hover"
+              onClick={onNew}
+            >
+              <td colSpan={columns} className="h-9 px-2">
+                <span className="flex items-center gap-1.5">
+                  <Icon path={ICONS.plus} />
+                  New issue
+                </span>
+              </td>
+            </tr>
+          ) : null}
+        </tbody>
+        {items !== null && items.length > 0 ? (
+          <tfoot>
+            <tr>
+              <td className="h-9 px-2 text-right">
+                <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+                  Count
+                </span>
+                <span className="ml-1.5 text-sm text-foreground">
+                  {items.length}
+                </span>
+              </td>
+              <td colSpan={columns - 1} />
+            </tr>
+          </tfoot>
+        ) : null}
+      </table>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Pickers shared by the issue detail view.
-// ---------------------------------------------------------------------------
-
-function AssigneePicker({
-  project,
-  assignees,
-  onToggle,
+/** One database: title, view tabs, toolbar, filters, table. */
+function DatabaseView({
+  route,
+  navigate,
+  projects,
+  query,
+  onQuery,
 }: {
-  project: string;
-  assignees: string[];
-  onToggle: (username: string, assigned: boolean) => void;
+  route: Route;
+  navigate: (route: Route) => void;
+  projects: ProjectInfo[];
+  query: string;
+  onQuery: (query: string) => void;
 }) {
-  const rpc = useRpc<typeof gitlabRpcContract>();
+  const kind: Kind = route.view === "merge_requests" ? "mr" : "issue";
+  const { items, error } = useItems({ kind });
   const viewer = useViewer();
-  const [users, setUsers] = useState<string[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    if (users !== null) return;
-    rpc.call("assignableUsers", { project }).then(
-      (result) => setUsers(result.users),
-      (error: unknown) => setLoadError(errorText(error)),
-    );
-  }, [rpc, project, users]);
-
-  // The viewer floats to the top of the picker.
-  const ordered =
-    users === null
-      ? null
-      : [...users].sort((a, b) => Number(b === viewer) - Number(a === viewer));
+  const parsed = useMemo(() => parseItemQuery(query), [query]);
+  const filtered = useMemo(
+    () =>
+      items === null
+        ? null
+        : items.filter((item) => matchesItemQuery(item, parsed, viewer)),
+    [items, parsed, viewer],
+  );
+  const hasQualifiers = queryTokens(query).some((token) => token.key !== "");
+  // The funnel shows and hides the pill row; it starts shown when filtering.
+  const [showFilters, setShowFilters] = useState(hasQualifiers);
+  const onNew = kind === "issue" ? () => navigate({ view: "new" }) : undefined;
 
   return (
-    <DropdownMenu onOpenChange={(open) => open && load()}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs text-muted-foreground"
-          aria-label="Edit assignees"
+    <div className="flex flex-col">
+      <h1 className="pb-6 pt-2 text-[40px] font-bold leading-[1.2] text-foreground">
+        GitLab
+      </h1>
+      <div className="flex flex-wrap items-center gap-1 pb-1.5" role="tablist">
+        <ViewTab
+          icon={ICONS.table}
+          active={kind === "issue"}
+          onClick={() => navigate({ view: "issues" })}
         >
-          Edit
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-72 w-56 overflow-y-auto">
-        <DropdownMenuLabel>Assignees</DropdownMenuLabel>
-        {loadError !== null ? (
-          <DropdownMenuItem disabled>{loadError}</DropdownMenuItem>
-        ) : ordered === null ? (
-          <DropdownMenuItem disabled>Loading…</DropdownMenuItem>
-        ) : ordered.length === 0 ? (
-          <DropdownMenuItem disabled>No assignable users</DropdownMenuItem>
-        ) : (
-          ordered.map((username) => (
-            <DropdownMenuCheckboxItem
-              key={username}
-              checked={assignees.includes(username)}
-              onCheckedChange={(checked) => onToggle(username, checked === true)}
-              onSelect={(event) => event.preventDefault()}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <Avatar username={username} size="size-4" />
-                <span className="truncate">
-                  {username}
-                  {username === viewer ? " (you)" : ""}
-                </span>
-              </span>
-            </DropdownMenuCheckboxItem>
-          ))
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function LabelPicker({
-  project,
-  labels,
-  onToggle,
-}: {
-  project: string;
-  labels: string[];
-  onToggle: (label: string, enabled: boolean) => void;
-}) {
-  const rpc = useRpc<typeof gitlabRpcContract>();
-  const [available, setAvailable] = useState<string[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    if (available !== null) return;
-    rpc.call("projectLabels", { project }).then(
-      (result) => setAvailable(result.labels),
-      (error: unknown) => setLoadError(errorText(error)),
-    );
-  }, [rpc, project, available]);
-
-  const ordered =
-    available === null
-      ? null
-      : [...new Set([...labels, ...available])].sort((a, b) =>
-          a.localeCompare(b),
-        );
-
-  return (
-    <DropdownMenu onOpenChange={(open) => open && load()}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs text-muted-foreground"
-          aria-label="Edit labels"
+          Issues
+        </ViewTab>
+        <ViewTab
+          icon={ICONS.branch}
+          active={kind === "mr"}
+          onClick={() => navigate({ view: "merge_requests" })}
         >
-          Edit
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-72 w-56 overflow-y-auto">
-        <DropdownMenuLabel>Labels</DropdownMenuLabel>
-        {loadError !== null ? (
-          <DropdownMenuItem disabled>{loadError}</DropdownMenuItem>
-        ) : ordered === null ? (
-          <DropdownMenuItem disabled>Loading…</DropdownMenuItem>
-        ) : ordered.length === 0 ? (
-          <DropdownMenuItem disabled>No labels in this project</DropdownMenuItem>
-        ) : (
-          ordered.map((label) => (
-            <DropdownMenuCheckboxItem
-              key={label}
-              checked={labels.includes(label)}
-              onCheckedChange={(checked) => onToggle(label, checked === true)}
-              onSelect={(event) => event.preventDefault()}
-            >
-              <span className="min-w-0 truncate">{label}</span>
-            </DropdownMenuCheckboxItem>
-          ))
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Issue detail: body + notes on the left, metadata sidebar on the right.
-// ---------------------------------------------------------------------------
-
-function IssueDetailView({
-  project,
-  iid,
-  onBack,
-}: {
-  project: string;
-  iid: number;
-  onBack: () => void;
-}) {
-  const rpc = useRpc<typeof gitlabRpcContract>();
-  const links = useLinks();
-  const { spawn, spawningKey } = useSpawn();
-  const { setIssueState, setAssignees, setLabels } = useItemMutations();
-  const [detail, setDetail] = useState<IssueDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    rpc.call("getIssue", { project, iid }).then(
-      (result) => {
-        setDetail(result.issue);
-        setError(null);
-      },
-      (err: unknown) => setError(errorText(err)),
-    );
-  }, [rpc, project, iid]);
-  useEffect(() => {
-    setDetail(null);
-    load();
-  }, [load]);
-
-  const changeState = useCallback(
-    (next: "open" | "closed") => {
-      setDetail((prev) =>
-        prev === null
-          ? prev
-          : { ...prev, state: next === "closed" ? "closed" : "opened" },
-      );
-      setIssueState(project, iid, next).catch((err: unknown) => {
-        toast.error(errorText(err));
-        load();
-      });
-    },
-    [setIssueState, project, iid, load],
-  );
-
-  const toggleAssignee = useCallback(
-    (username: string, assigned: boolean) => {
-      let next: string[] = [];
-      setDetail((prev) => {
-        if (prev === null) return prev;
-        next = assigned
-          ? [...new Set([...prev.assignees, username])]
-          : prev.assignees.filter((entry) => entry !== username);
-        return { ...prev, assignees: next };
-      });
-      setAssignees(project, iid, next).catch((err: unknown) => {
-        toast.error(errorText(err));
-        load();
-      });
-    },
-    [setAssignees, project, iid, load],
-  );
-
-  const toggleLabel = useCallback(
-    (label: string, enabled: boolean) => {
-      let next: string[] = [];
-      setDetail((prev) => {
-        if (prev === null) return prev;
-        next = enabled
-          ? [...new Set([...prev.labels, label])]
-          : prev.labels.filter((entry) => entry !== label);
-        return { ...prev, labels: next };
-      });
-      setLabels(project, iid, next).catch((err: unknown) => {
-        toast.error(errorText(err));
-        load();
-      });
-    },
-    [setLabels, project, iid, load],
-  );
-
-  if (error !== null) return <EmptyState message={error} />;
-  if (detail === null) return <DetailSkeleton />;
-
-  const issueLinks = links[linkKey("issue", project, iid)];
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onBack}>
-          ← Issues
-        </Button>
-        <span className="min-w-0 truncate">
-          {project} · #{iid}
-        </span>
+          Merge requests
+        </ViewTab>
         <span className="flex-1" />
-        <a
-          href={detail.url}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 underline hover:text-foreground"
+        <GhostButton
+          aria-label="Filter"
+          aria-pressed={showFilters}
+          className={cn(
+            "w-7 justify-center px-0",
+            hasQualifiers && "text-blue-600 [.dark_&]:text-blue-400",
+          )}
+          onClick={() => setShowFilters((prev) => !prev)}
         >
-          Open on GitLab ↗
-        </a>
+          <Icon path={ICONS.filter} />
+        </GhostButton>
+        <SearchBox query={query} onQuery={onQuery} />
+        {onNew !== undefined ? (
+          <PrimaryButton className="ml-1" onClick={onNew}>
+            New
+          </PrimaryButton>
+        ) : null}
       </div>
-
-      <div className="flex items-start gap-3">
-        <h2 className="min-w-0 flex-1 text-xl font-semibold text-foreground">
-          {detail.title}{" "}
-          <span className="font-normal text-muted-foreground">#{detail.iid}</span>
-        </h2>
-        <Button
-          size="sm"
-          disabled={spawningKey !== null}
-          onClick={() => spawn("issue", project, iid)}
-        >
-          {spawningKey !== null ? "Starting…" : "Send agent"}
-        </Button>
-      </div>
-
-      <div className="flex flex-col gap-6 lg:flex-row">
-        <div className="flex min-w-0 flex-1 flex-col gap-4">
-          <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <div className="flex items-center gap-2 border-b border-border bg-muted/50 px-4 py-2 text-xs text-muted-foreground">
-              <Avatar username={detail.author} />
-              <span className="font-medium text-foreground">
-                {detail.author}
-              </span>
-              opened this issue · updated {relativeTime(detail.updatedAt)}
-            </div>
-            <div className="p-4">
-              {detail.body.length > 0 ? (
-                <Markdown content={detail.body} className="text-sm" />
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  (no description)
-                </p>
-              )}
-            </div>
-          </div>
-
-          {detail.notes.length > 0 ? (
-            <div className="flex flex-col gap-2">
-              <h3 className="text-xs font-semibold text-muted-foreground">
-                Activity · {detail.notes.length}
-              </h3>
-              {detail.notes.map((note, index) => (
-                <NoteCard key={index} note={note} />
-              ))}
-            </div>
-          ) : null}
-
-          <CommentBox
-            method="commentIssue"
-            project={project}
-            iid={iid}
-            onPosted={load}
+      {showFilters ? (
+        <div className="pb-2">
+          <FilterBar
+            kind={kind}
+            items={items}
+            projects={projects}
+            query={query}
+            onQuery={onQuery}
           />
         </div>
-
-        <aside className="flex w-full shrink-0 flex-col gap-5 lg:w-56">
-          <div className="flex flex-col gap-2">
-            <SidebarHeading>State</SidebarHeading>
-            <Select
-              value={detail.state === "opened" ? "open" : "closed"}
-              onValueChange={(value) =>
-                changeState(value === "closed" ? "closed" : "open")
-              }
-            >
-              <SelectTrigger className="h-8 w-full text-sm" aria-label="State">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="open">
-                  <span className="flex items-center gap-2">
-                    <StateDot state="opened" /> Open
-                  </span>
-                </SelectItem>
-                <SelectItem value="closed">
-                  <span className="flex items-center gap-2">
-                    <StateDot state="closed" /> Closed
-                  </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <SidebarHeading>Assignees</SidebarHeading>
-              <AssigneePicker
-                project={project}
-                assignees={detail.assignees}
-                onToggle={toggleAssignee}
-              />
-            </div>
-            {detail.assignees.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No one assigned</p>
-            ) : (
-              detail.assignees.map((username) => (
-                <UserLine key={username} username={username} />
-              ))
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between">
-              <SidebarHeading>Labels</SidebarHeading>
-              <LabelPicker
-                project={project}
-                labels={detail.labels}
-                onToggle={toggleLabel}
-              />
-            </div>
-            {detail.labels.length === 0 ? (
-              <p className="text-sm text-muted-foreground">None yet</p>
-            ) : (
-              <LabelChips labels={detail.labels} className="flex flex-wrap" />
-            )}
-          </div>
-
-          {issueLinks !== undefined && issueLinks.length > 0 ? (
-            <div className="flex flex-col gap-1.5">
-              <SidebarHeading>Agents</SidebarHeading>
-              <ThreadPills links={issueLinks} />
-            </div>
-          ) : null}
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Merge-request detail — pipeline, approvals, discussions, diffs. One
-// component serves both the nav panel (two-column, metadata sidebar) and the
-// thread side panel (single column via `compact`).
-// ---------------------------------------------------------------------------
-
-function jobDotClass(status: Job["status"]): string {
-  if (status === "success") return "bg-primary";
-  if (status === "failure") return "bg-destructive";
-  if (status === "pending") return "animate-pulse bg-muted-foreground";
-  return "bg-muted-foreground/50";
-}
-
-/** GitLab's pipeline, with its jobs — the panel's answer to "is it green?". */
-function PipelineSection({
-  pipeline,
-  jobs,
-}: {
-  pipeline: MergeRequestDetail["pipeline"];
-  jobs: Job[];
-}) {
-  const [open, setOpen] = useState(() =>
-    jobs.some((job) => job.status === "failure"),
-  );
-  if (pipeline === null && jobs.length === 0) return null;
-  const passing = jobs.filter((job) => job.status === "success").length;
-  const failing = jobs.filter((job) => job.status === "failure").length;
-  const summaryDot =
-    failing > 0
-      ? "bg-destructive"
-      : jobs.length > 0 && passing === jobs.length
-        ? "bg-primary"
-        : "animate-pulse bg-muted-foreground";
-  return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <button
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent/50"
-        onClick={() => setOpen((prev) => !prev)}
-        aria-expanded={open}
-      >
-        <span className={`size-2 shrink-0 rounded-full ${summaryDot}`} />
-        <span className="font-medium text-foreground">Pipeline</span>
-        <span className="min-w-0 truncate text-xs text-muted-foreground">
-          {pipeline !== null ? pipeline.status : "no pipeline"}
-          {jobs.length > 0
-            ? ` · ${passing}/${jobs.length} jobs passing${failing > 0 ? ` · ${failing} failing` : ""}`
-            : ""}
-        </span>
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-          {open ? "▾" : "▸"}
-        </span>
-      </button>
-      {open ? (
-        <div className="divide-y divide-border border-t border-border">
-          {pipeline !== null && pipeline.url.length > 0 ? (
-            <p className="px-3 py-1.5 text-xs">
-              <a
-                href={pipeline.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-muted-foreground underline hover:text-foreground"
-              >
-                Pipeline on GitLab ↗
-              </a>
-            </p>
-          ) : null}
-          {jobs.map((job, index) => (
-            <div
-              key={`${job.name}-${index}`}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs"
-            >
-              <span
-                className={`size-2 shrink-0 rounded-full ${jobDotClass(job.status)}`}
-              />
-              <span className="min-w-0 flex-1 truncate text-foreground">
-                {job.name}
-              </span>
-              <span className="shrink-0 text-muted-foreground">
-                {job.rawStatus}
-              </span>
-              {job.url.length > 0 ? (
-                <a
-                  href={job.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="shrink-0 text-muted-foreground underline hover:text-foreground"
-                >
-                  job ↗
-                </a>
-              ) : null}
-            </div>
-          ))}
-        </div>
       ) : null}
-    </div>
-  );
-}
-
-function ApprovalsSummary({ mr }: { mr: MergeRequestDetail }) {
-  const approved = Math.max(0, mr.approvalsRequired - mr.approvalsLeft);
-  const label =
-    mr.approvalsRequired === 0
-      ? mr.approvedBy.length > 0
-        ? `${mr.approvedBy.length} approval${mr.approvedBy.length === 1 ? "" : "s"} · none required`
-        : "No approvals required"
-      : mr.approvalsLeft === 0
-        ? `Approved · ${approved}/${mr.approvalsRequired}`
-        : `${approved}/${mr.approvalsRequired} approvals · ${mr.approvalsLeft} left`;
-  return (
-    <div className="flex flex-col gap-1">
-      <p
-        className={`text-sm ${
-          mr.approvalsRequired > 0 && mr.approvalsLeft === 0
-            ? "text-foreground"
-            : "text-muted-foreground"
-        }`}
-      >
-        {label}
-      </p>
-      {mr.approvedBy.map((username) => (
-        <UserLine key={username} username={username} />
-      ))}
-    </div>
-  );
-}
-
-/** An inline discussion: file/line header, resolved state, comment chain. */
-function DiscussionCard({ discussion }: { discussion: Discussion }) {
-  return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <p className="flex items-center gap-2 border-b border-border bg-muted/50 px-3 py-1.5 font-mono text-xs text-muted-foreground">
-        <span className="min-w-0 truncate">
-          {discussion.path.length > 0 ? discussion.path : "(no file)"}
-        </span>
-        {discussion.line !== null ? (
-          <span className="shrink-0">:{discussion.line}</span>
-        ) : null}
-        <span className="ml-auto shrink-0">
-          <Badge
-            variant={discussion.resolved ? "secondary" : "outline"}
-            className="font-normal"
-          >
-            {discussion.resolved ? "resolved" : "unresolved"}
-          </Badge>
-        </span>
-      </p>
-      <div className="flex flex-col gap-3 p-3">
-        {discussion.notes.map((note, index) => (
-          <div key={index}>
-            <p className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-              <Avatar username={note.author} size="size-4" />
-              <span className="font-medium text-foreground">{note.author}</span>{" "}
-              · {relativeTime(note.createdAt)}
-            </p>
-            <Markdown content={note.body} className="text-sm" />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function DiscussionsSection({
-  discussions,
-}: {
-  discussions: Discussion[];
-}) {
-  // Grouped by file, then in line order: reviewing reads file by file.
-  const groups = useMemo(() => {
-    const byPath = new Map<string, Discussion[]>();
-    for (const discussion of discussions) {
-      const existing = byPath.get(discussion.path);
-      if (existing === undefined) byPath.set(discussion.path, [discussion]);
-      else existing.push(discussion);
-    }
-    return [...byPath.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([path, entries]) => ({
-        path,
-        entries: [...entries].sort((a, b) => (a.line ?? 0) - (b.line ?? 0)),
-      }));
-  }, [discussions]);
-  if (groups.length === 0) return null;
-  const unresolved = discussions.filter((entry) => !entry.resolved).length;
-  return (
-    <div className="flex flex-col gap-2">
-      <h3 className="text-xs font-semibold text-muted-foreground">
-        Discussions · {discussions.length}
-        {unresolved > 0 ? ` · ${unresolved} unresolved` : ""}
-      </h3>
-      {groups.map((group) => (
-        <div key={group.path} className="flex flex-col gap-2">
-          {group.entries.map((discussion, index) => (
-            <DiscussionCard key={index} discussion={discussion} />
-          ))}
-        </div>
-      ))}
+      <ItemsTable
+        kind={kind}
+        items={filtered}
+        error={error}
+        hasFilter={query.trim().length > 0}
+        showProject={projects.length > 1}
+        onOpenItem={(project, iid) =>
+          navigate(
+            kind === "mr"
+              ? { view: "merge_request", project, iid }
+              : { view: "issue", project, iid },
+          )
+        }
+        onNew={onNew}
+      />
     </div>
   );
 }
@@ -1870,54 +1790,558 @@ function DiffPatch({ path, patch }: { path: string; patch: string }) {
   return <FileDiff fileDiff={fileDiff} options={options} />;
 }
 
-function FileDiffCard({ file, url }: { file: DiffFile; url: string }) {
+// ---------------------------------------------------------------------------
+// Property editors. The whole value cell is the trigger, as in Notion.
+// ---------------------------------------------------------------------------
+
+function AssigneePicker({
+  project,
+  assignees,
+  onToggle,
+}: {
+  project: string;
+  assignees: string[];
+  onToggle: (username: string, assigned: boolean) => void;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const viewer = useViewer();
+  const [users, setUsers] = useState<string[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (users !== null) return;
+    rpc.call("assignableUsers", { project }).then(
+      (result) => setUsers(result.users),
+      (error: unknown) => setLoadError(errorText(error)),
+    );
+  }, [rpc, project, users]);
+
+  // The viewer floats to the top of the picker.
+  const ordered =
+    users === null
+      ? null
+      : [...users].sort((a, b) => Number(b === viewer) - Number(a === viewer));
+
+  return (
+    <DropdownMenu onOpenChange={(open) => open && load()}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className={PROPERTY_CONTROL_CLASS} aria-label="Edit assignees">
+          {assignees.length === 0 ? (
+            <EmptyValue />
+          ) : (
+            assignees.map((username) => <Person key={username} username={username} />)
+          )}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-72 w-60 overflow-y-auto">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Assignees
+        </DropdownMenuLabel>
+        {loadError !== null ? (
+          <DropdownMenuItem disabled>{loadError}</DropdownMenuItem>
+        ) : ordered === null ? (
+          <DropdownMenuItem disabled>Loading…</DropdownMenuItem>
+        ) : ordered.length === 0 ? (
+          <DropdownMenuItem disabled>No assignable users</DropdownMenuItem>
+        ) : (
+          ordered.map((username) => (
+            <DropdownMenuCheckboxItem
+              key={username}
+              checked={assignees.includes(username)}
+              onCheckedChange={(checked) => onToggle(username, checked === true)}
+              onSelect={(event) => event.preventDefault()}
+            >
+              <Person username={username === viewer ? `${username} (me)` : username} />
+            </DropdownMenuCheckboxItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function LabelPicker({
+  project,
+  labels,
+  onToggle,
+}: {
+  project: string;
+  labels: string[];
+  onToggle: (label: string, enabled: boolean) => void;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const [available, setAvailable] = useState<string[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (available !== null) return;
+    rpc.call("projectLabels", { project }).then(
+      (result) => setAvailable(result.labels),
+      (error: unknown) => setLoadError(errorText(error)),
+    );
+  }, [rpc, project, available]);
+
+  const ordered =
+    available === null
+      ? null
+      : [...new Set([...labels, ...available])].sort((a, b) =>
+          a.localeCompare(b),
+        );
+
+  return (
+    <DropdownMenu onOpenChange={(open) => open && load()}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className={PROPERTY_CONTROL_CLASS} aria-label="Edit labels">
+          {labels.length === 0 ? <EmptyValue /> : <LabelTags labels={labels} />}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-72 w-60 overflow-y-auto">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Labels
+        </DropdownMenuLabel>
+        {loadError !== null ? (
+          <DropdownMenuItem disabled>{loadError}</DropdownMenuItem>
+        ) : ordered === null ? (
+          <DropdownMenuItem disabled>Loading…</DropdownMenuItem>
+        ) : ordered.length === 0 ? (
+          <DropdownMenuItem disabled>No labels in this project</DropdownMenuItem>
+        ) : (
+          ordered.map((label) => (
+            <DropdownMenuCheckboxItem
+              key={label}
+              checked={labels.includes(label)}
+              onCheckedChange={(checked) => onToggle(label, checked === true)}
+              onSelect={(event) => event.preventDefault()}
+            >
+              <Tag color={colorForName(label)}>{label}</Tag>
+            </DropdownMenuCheckboxItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Issue page.
+// ---------------------------------------------------------------------------
+
+/** Adds or removes one entry, keeping order and dropping duplicates. */
+function toggled(list: string[], entry: string, on: boolean): string[] {
+  return on
+    ? [...new Set([...list, entry])]
+    : list.filter((existing) => existing !== entry);
+}
+
+function IssueDetailView({
+  project,
+  iid,
+  onBack,
+}: {
+  project: string;
+  iid: number;
+  onBack: () => void;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const links = useLinks();
+  const { spawn, spawningKey } = useSpawn();
+  const { setIssueState, setAssignees, setLabels } = useItemMutations();
+  const [detail, setDetail] = useState<IssueDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // The latest detail, readable synchronously by the toggles below: a
+  // setState updater runs later than the call that needs its result.
+  const detailRef = useRef<IssueDetail | null>(null);
+  detailRef.current = detail;
+
+  const load = useCallback(() => {
+    rpc.call("getIssue", { project, iid }).then(
+      (result) => {
+        setDetail(result.issue);
+        setError(null);
+      },
+      (err: unknown) => setError(errorText(err)),
+    );
+  }, [rpc, project, iid]);
+  useEffect(() => {
+    setDetail(null);
+    load();
+  }, [load]);
+
+  const changeState = useCallback(
+    (next: "open" | "closed") => {
+      setDetail((prev) =>
+        prev === null
+          ? prev
+          : { ...prev, state: next === "closed" ? "closed" : "opened" },
+      );
+      setIssueState(project, iid, next).catch((err: unknown) => {
+        toast.error(errorText(err));
+        load();
+      });
+    },
+    [setIssueState, project, iid, load],
+  );
+
+  const toggleAssignee = useCallback(
+    (username: string, assigned: boolean) => {
+      const current = detailRef.current;
+      if (current === null) return;
+      const next = toggled(current.assignees, username, assigned);
+      detailRef.current = { ...current, assignees: next };
+      setDetail(detailRef.current);
+      setAssignees(project, iid, next).catch((err: unknown) => {
+        toast.error(errorText(err));
+        load();
+      });
+    },
+    [setAssignees, project, iid, load],
+  );
+
+  const toggleLabel = useCallback(
+    (label: string, enabled: boolean) => {
+      const current = detailRef.current;
+      if (current === null) return;
+      const next = toggled(current.labels, label, enabled);
+      detailRef.current = { ...current, labels: next };
+      setDetail(detailRef.current);
+      setLabels(project, iid, next).catch((err: unknown) => {
+        toast.error(errorText(err));
+        load();
+      });
+    },
+    [setLabels, project, iid, load],
+  );
+
+  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (detail === null) return <PageSkeleton />;
+
+  const issueLinks = links[linkKey("issue", project, iid)];
+  return (
+    <div className="flex flex-col">
+      <PageTopBar
+        crumbs={[
+          { label: "Issues", onClick: onBack },
+          { label: shortProject(project), title: project },
+          { label: `#${iid}` },
+        ]}
+        actions={
+          <>
+            <GhostButton
+              disabled={spawningKey !== null}
+              onClick={() => spawn("issue", project, iid)}
+            >
+              {spawningKey !== null ? "Starting…" : "⚡ Send agent"}
+            </GhostButton>
+            <PageMoreMenu url={detail.url} />
+          </>
+        }
+      />
+      <article className="mx-auto w-full max-w-[708px] pt-12">
+        <h1 className="pb-2 text-[40px] font-bold leading-[1.2] text-foreground">
+          {detail.title}
+        </h1>
+
+        <div className="flex flex-col gap-0.5 py-1.5">
+          <PropertyRow
+            icon={ICONS.status}
+            label="Status"
+            control={
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button type="button" className={PROPERTY_CONTROL_CLASS} aria-label="State">
+                    <StateStatus state={detail.state} />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onSelect={() => changeState("open")}>
+                    <StateStatus state="opened" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => changeState("closed")}>
+                    <StateStatus state="closed" />
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            }
+          />
+          <PropertyRow
+            icon={ICONS.users}
+            label="Assignee"
+            control={
+              <AssigneePicker
+                project={project}
+                assignees={detail.assignees}
+                onToggle={toggleAssignee}
+              />
+            }
+          />
+          <PropertyRow
+            icon={ICONS.list}
+            label="Labels"
+            control={
+              <LabelPicker
+                project={project}
+                labels={detail.labels}
+                onToggle={toggleLabel}
+              />
+            }
+          />
+          <PropertyRow icon={ICONS.user} label="Author">
+            <Person username={detail.author} />
+          </PropertyRow>
+          <PropertyRow icon={ICONS.folder} label="Project">
+            <span title={project}>{project}</span>
+          </PropertyRow>
+          <PropertyRow icon={ICONS.clock} label="Updated">
+            <span title={formatDateTime(detail.updatedAt)}>
+              {formatDateTime(detail.updatedAt)}
+            </span>
+          </PropertyRow>
+          {issueLinks !== undefined && issueLinks.length > 0 ? (
+            <PropertyRow icon={ICONS.bolt} label="Agents">
+              <ThreadPills links={issueLinks} />
+            </PropertyRow>
+          ) : null}
+        </div>
+
+        <div className="pb-2 pt-1">
+          <PageComments
+            method="commentIssue"
+            project={project}
+            iid={iid}
+            notes={detail.notes}
+            onPosted={load}
+          />
+        </div>
+        <div className="border-t border-border/70 pt-6">
+          <PageBody16 body={detail.body} />
+        </div>
+      </article>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Merge-request page — the issue page's shape, plus pipeline, approvals,
+// discussions, and diffs as toggle sections. One component serves the nav
+// panel and the thread side panel (`compact`).
+// ---------------------------------------------------------------------------
+
+/** GitLab's pipeline and its jobs: a toggle that opens itself on failure. */
+function PipelineSection({
+  pipeline,
+  jobs,
+}: {
+  pipeline: MergeRequestDetail["pipeline"];
+  jobs: Job[];
+}) {
+  if (pipeline === null && jobs.length === 0) return null;
+  const passing = jobs.filter((job) => job.status === "success").length;
+  const failing = jobs.filter((job) => job.status === "failure").length;
+  return (
+    <ToggleSection
+      title="Pipeline"
+      defaultOpen={failing > 0}
+      meta={
+        jobs.length > 0
+          ? `${passing}/${jobs.length} passed${failing > 0 ? ` · ${failing} failed` : ""}`
+          : undefined
+      }
+      actions={
+        pipeline !== null && pipeline.url.length > 0 ? (
+          <a
+            href={pipeline.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-sm text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+          >
+            <Icon path={ICONS.external} size={14} />
+            GitLab
+          </a>
+        ) : undefined
+      }
+    >
+      {jobs.length === 0 ? (
+        <p className="py-1 text-sm text-muted-foreground">No jobs.</p>
+      ) : (
+        <div className="flex flex-col">
+          {jobs.map((job, index) => (
+            <div
+              key={`${job.name}-${index}`}
+              className="group/job flex h-8 items-center gap-2 rounded-md px-1.5 text-sm transition-colors hover:bg-state-hover"
+            >
+              <span className="w-28 shrink-0">
+                <PipelineStatus status={job.rawStatus} />
+              </span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-foreground">
+                {job.name}
+              </span>
+              {job.url.length > 0 ? (
+                <a
+                  href={job.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/job:opacity-100"
+                >
+                  Log ↗
+                </a>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </ToggleSection>
+  );
+}
+
+function approvalsText(mr: MergeRequestDetail): string {
+  if (mr.approvalsRequired === 0) {
+    return mr.approvedBy.length > 0
+      ? `${mr.approvedBy.length} approval${mr.approvedBy.length === 1 ? "" : "s"}`
+      : "Not required";
+  }
+  const approved = Math.max(0, mr.approvalsRequired - mr.approvalsLeft);
+  return mr.approvalsLeft === 0
+    ? `Approved ${approved}/${mr.approvalsRequired}`
+    : `${approved}/${mr.approvalsRequired} · ${mr.approvalsLeft} left`;
+}
+
+/** An inline review thread: file/line, resolved state, its comments. */
+function DiscussionBlock({ discussion }: { discussion: Discussion }) {
+  return (
+    <div className="flex flex-col border-l-2 border-border pl-3">
+      <p className="flex min-w-0 items-center gap-2 py-1 text-sm">
+        <span className="min-w-0 truncate font-mono text-[13px] text-muted-foreground">
+          {discussion.path.length > 0 ? discussion.path : "General"}
+          {discussion.line !== null ? `:${discussion.line}` : ""}
+        </span>
+        {discussion.resolved ? (
+          <Tag color="green">Resolved</Tag>
+        ) : (
+          <Tag color="orange">Unresolved</Tag>
+        )}
+      </p>
+      {discussion.notes.map((note, index) => (
+        <CommentItem key={`${note.createdAt}-${index}`} note={note} />
+      ))}
+    </div>
+  );
+}
+
+function DiscussionsSection({ discussions }: { discussions: Discussion[] }) {
+  // Grouped by file, then in line order: reviewing reads file by file.
+  const ordered = useMemo(
+    () =>
+      [...discussions].sort(
+        (a, b) => a.path.localeCompare(b.path) || (a.line ?? 0) - (b.line ?? 0),
+      ),
+    [discussions],
+  );
+  if (ordered.length === 0) return null;
+  const unresolved = discussions.filter((entry) => !entry.resolved).length;
+  return (
+    <ToggleSection
+      title="Discussions"
+      defaultOpen={unresolved > 0}
+      meta={`${discussions.length}${unresolved > 0 ? ` · ${unresolved} unresolved` : ""}`}
+    >
+      <div className="flex flex-col gap-3 py-1">
+        {ordered.map((discussion, index) => (
+          <DiscussionBlock key={index} discussion={discussion} />
+        ))}
+      </div>
+    </ToggleSection>
+  );
+}
+
+/** One changed file: a nested toggle whose body is the diff. */
+function FileDiffRow({ file, url }: { file: DiffFile; url: string }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    <div className="flex flex-col">
       <button
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/50"
+        type="button"
+        className="flex h-8 min-w-0 items-center gap-1.5 rounded-md px-1 text-left transition-colors hover:bg-state-hover"
         onClick={() => setOpen((prev) => !prev)}
         aria-expanded={open}
       >
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {open ? "▾" : "▸"}
+        <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
+          <ToggleCaret open={open} />
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+        <Icon path={ICONS.file} size={14} className="text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-foreground" title={file.path}>
           {file.path}
         </span>
         {file.status !== "modified" ? (
-          <Badge
-            variant="secondary"
-            className="shrink-0 font-normal text-muted-foreground"
+          <Tag
+            color={
+              file.status === "added"
+                ? "green"
+                : file.status === "deleted"
+                  ? "red"
+                  : "blue"
+            }
           >
             {file.status}
-          </Badge>
+          </Tag>
         ) : null}
-        <span className="shrink-0 text-xs text-primary">+{file.additions}</span>
-        <span className="shrink-0 text-xs text-destructive">
+        <span className="shrink-0 font-mono text-xs text-emerald-700 [.dark_&]:text-emerald-400">
+          +{file.additions}
+        </span>
+        <span className="shrink-0 font-mono text-xs text-red-700 [.dark_&]:text-red-400">
           −{file.deletions}
         </span>
       </button>
       {open ? (
-        file.patch !== null ? (
-          <div className="border-t border-border">
+        <div className="my-1 ml-6 overflow-hidden rounded-md border border-border/70">
+          {file.patch !== null ? (
             <DiffPatch path={file.path} patch={file.patch} />
-          </div>
-        ) : (
-          <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-            Diff too large to inline —{" "}
-            <a
-              href={`${url}/diffs`}
-              target="_blank"
-              rel="noreferrer"
-              className="underline"
-            >
-              view on GitLab ↗
-            </a>
-          </p>
-        )
+          ) : (
+            <p className="px-3 py-2 text-sm text-muted-foreground">
+              Too large to show here —{" "}
+              <a href={`${url}/diffs`} target="_blank" rel="noreferrer" className="underline">
+                open in GitLab ↗
+              </a>
+            </p>
+          )}
+        </div>
       ) : null}
     </div>
+  );
+}
+
+function ChangesSection({ mr }: { mr: MergeRequestDetail }) {
+  if (mr.files.length === 0) return null;
+  return (
+    <ToggleSection
+      title="Changes"
+      meta={
+        <>
+          {mr.filesTruncated
+            ? `${mr.files.length} of ${mr.changedFiles} files`
+            : `${mr.files.length} file${mr.files.length === 1 ? "" : "s"}`}{" "}
+          <span className="font-mono text-emerald-700 [.dark_&]:text-emerald-400">
+            +{mr.additions}
+          </span>{" "}
+          <span className="font-mono text-red-700 [.dark_&]:text-red-400">
+            −{mr.deletions}
+          </span>
+        </>
+      }
+    >
+      {mr.filesTruncated ? (
+        <Callout icon="💡" className="mb-1 py-2.5">
+          Only the first page of diffs is here.{" "}
+          <a href={`${mr.url}/diffs`} target="_blank" rel="noreferrer" className="underline">
+            Open the full diff in GitLab ↗
+          </a>
+        </Callout>
+      ) : null}
+      <div className="flex flex-col">
+        {mr.files.map((file) => (
+          <FileDiffRow key={file.path} file={file} url={mr.url} />
+        ))}
+      </div>
+    </ToggleSection>
   );
 }
 
@@ -1954,204 +2378,124 @@ function MergeRequestDetailView({
     load();
   }, [load]);
 
-  if (error !== null) return <EmptyState message={error} />;
-  if (mr === null) return <DetailSkeleton />;
+  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (mr === null) return <PageSkeleton />;
 
   const mrLinks = links[linkKey("mr", project, iid)];
-  const mainColumn = (
-    <div className="flex min-w-0 flex-1 flex-col gap-4">
-      <PipelineSection pipeline={mr.pipeline} jobs={mr.jobs} />
-
-      <div className="overflow-hidden rounded-lg border border-border bg-card">
-        <div className="flex items-center gap-2 border-b border-border bg-muted/50 px-4 py-2 text-xs text-muted-foreground">
-          <Avatar username={mr.author} />
-          <span className="font-medium text-foreground">{mr.author}</span>
-          opened this merge request · updated {relativeTime(mr.updatedAt)}
-        </div>
-        <div className="p-4">
-          {mr.body.length > 0 ? (
-            <Markdown content={mr.body} className="text-sm" />
-          ) : (
-            <p className="text-sm text-muted-foreground">(no description)</p>
-          )}
-        </div>
-      </div>
-
-      {mr.notes.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <h3 className="text-xs font-semibold text-muted-foreground">
-            Activity · {mr.notes.length}
-          </h3>
-          {mr.notes.map((note, index) => (
-            <NoteCard key={index} note={note} />
-          ))}
-        </div>
-      ) : null}
-
-      <DiscussionsSection discussions={mr.discussions} />
-
-      {mr.files.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <h3 className="text-xs font-semibold text-muted-foreground">
-            {mr.filesTruncated
-              ? `Changes · showing ${mr.files.length} of ${mr.changedFiles} files`
-              : `Changes · ${mr.files.length} file${mr.files.length === 1 ? "" : "s"}`}
-            <span className="ml-2 font-normal">
-              <span className="text-primary">+{mr.additions}</span>{" "}
-              <span className="text-destructive">−{mr.deletions}</span>
-              {mr.filesTruncated ? " in the files below" : ""}
-            </span>
-          </h3>
-          {mr.filesTruncated ? (
-            <p className="text-xs text-muted-foreground">
-              GitLab returns one page of per-file diffs, so the rest of this
-              merge request — and its full line counts —{" "}
-              <a
-                href={`${mr.url}/diffs`}
-                target="_blank"
-                rel="noreferrer"
-                className="underline hover:text-foreground"
-              >
-                stay on GitLab ↗
-              </a>
-            </p>
-          ) : null}
-          {mr.files.map((file) => (
-            <FileDiffCard key={file.path} file={file} url={mr.url} />
-          ))}
-        </div>
-      ) : null}
-
-      <CommentBox
-        method="commentMergeRequest"
-        project={project}
-        iid={iid}
-        onPosted={load}
-      />
-    </div>
-  );
+  const people = (names: string[]) =>
+    names.length === 0 ? (
+      <EmptyValue />
+    ) : (
+      names.map((username) => <Person key={username} username={username} />)
+    );
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        {onBack !== undefined ? (
-          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onBack}>
-            ← {backLabel}
-          </Button>
-        ) : null}
-        <span className="min-w-0 truncate">
-          {project} · !{iid}
-        </span>
-        <span className="flex-1" />
-        <a
-          href={mr.url}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 underline hover:text-foreground"
-        >
-          Open on GitLab ↗
-        </a>
-      </div>
-
-      <div className="flex items-start gap-3">
-        <h2
-          className={`min-w-0 flex-1 font-semibold text-foreground ${compact ? "text-base" : "text-xl"}`}
-        >
-          {mr.title}{" "}
-          <span className="font-normal text-muted-foreground">!{mr.iid}</span>
-        </h2>
-        <Button
-          size="sm"
-          disabled={spawningKey !== null}
-          onClick={() => spawn("mr", project, iid)}
-        >
-          {spawningKey !== null ? "Starting…" : "Review with agent"}
-        </Button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <StateBadge state={mr.state} draft={mr.draft} />
-        {mr.hasConflicts ? (
-          <Badge variant="destructive" className="font-normal">
-            conflicts
-          </Badge>
-        ) : null}
-        {mr.mergeStatus.length > 0 ? (
-          <Badge variant="outline" className="font-normal">
-            {mr.mergeStatus.replace(/_/g, " ")}
-          </Badge>
-        ) : null}
-        <span className="font-mono">
-          {mr.sourceBranch} → {mr.targetBranch}
-        </span>
-        {/* With a truncated diff page the +/- sums cover only part of the
-            merge request, so the overview shows GitLab's file total alone. */}
-        <span>
-          {mr.filesTruncated ? null : (
-            <>
-              <span className="text-primary">+{mr.additions}</span>{" "}
-              <span className="text-destructive">−{mr.deletions}</span> ·{" "}
-            </>
+    <div className="flex flex-col">
+      <PageTopBar
+        crumbs={[
+          ...(onBack !== undefined ? [{ label: backLabel, onClick: onBack }] : []),
+          ...(compact ? [] : [{ label: shortProject(project), title: project }]),
+          { label: `!${iid}` },
+        ]}
+        actions={
+          <>
+            <GhostButton
+              disabled={spawningKey !== null}
+              onClick={() => spawn("mr", project, iid)}
+            >
+              {spawningKey !== null ? "Starting…" : compact ? "⚡ Review" : "⚡ Review with agent"}
+            </GhostButton>
+            <PageMoreMenu url={mr.url} />
+          </>
+        }
+      />
+      <article
+        className={cn(
+          "mx-auto flex w-full flex-col",
+          compact ? "pt-4" : "max-w-[708px] pt-12",
+        )}
+      >
+        <h1
+          className={cn(
+            "pb-2 font-bold leading-[1.2] text-foreground",
+            compact ? "text-[26px]" : "text-[40px]",
           )}
-          {mr.changedFiles} file{mr.changedFiles === 1 ? "" : "s"}
-        </span>
-        <LabelChips labels={mr.labels} className="flex flex-wrap" />
-        <ThreadPills links={mrLinks} />
-      </div>
+        >
+          {mr.title}
+        </h1>
 
-      {compact ? (
-        <>
-          <div className="flex flex-col gap-1">
-            <SidebarHeading>Approvals</SidebarHeading>
-            <ApprovalsSummary mr={mr} />
-          </div>
-          {mainColumn}
-        </>
-      ) : (
-        <div className="flex flex-col gap-6 lg:flex-row">
-          {mainColumn}
-          <aside className="flex w-full shrink-0 flex-col gap-5 lg:w-56">
-            <div className="flex flex-col gap-1">
-              <SidebarHeading>Approvals</SidebarHeading>
-              <ApprovalsSummary mr={mr} />
-            </div>
-            <div className="flex flex-col gap-1">
-              <SidebarHeading>Reviewers</SidebarHeading>
-              {mr.reviewers.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No reviewers</p>
-              ) : (
-                mr.reviewers.map((username) => (
-                  <UserLine key={username} username={username} />
-                ))
-              )}
-            </div>
-            <div className="flex flex-col gap-1">
-              <SidebarHeading>Assignees</SidebarHeading>
-              {mr.assignees.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No one assigned</p>
-              ) : (
-                mr.assignees.map((username) => (
-                  <UserLine key={username} username={username} />
-                ))
-              )}
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <SidebarHeading>Labels</SidebarHeading>
-              {mr.labels.length === 0 ? (
-                <p className="text-sm text-muted-foreground">None yet</p>
-              ) : (
-                <LabelChips labels={mr.labels} className="flex flex-wrap" />
-              )}
-            </div>
-            {mrLinks !== undefined && mrLinks.length > 0 ? (
-              <div className="flex flex-col gap-1.5">
-                <SidebarHeading>Agents</SidebarHeading>
-                <ThreadPills links={mrLinks} />
-              </div>
+        <div className="flex flex-col gap-0.5 py-1.5">
+          <PropertyRow icon={ICONS.status} label="Status" compact={compact}>
+            <StateStatus state={mr.state} draft={mr.draft} />
+            {mr.hasConflicts ? <Tag color="red">Conflicts</Tag> : null}
+            {mr.mergeStatus.length > 0 ? (
+              <Tag color={mr.mergeStatus === "mergeable" ? "green" : "default"}>
+                {mr.mergeStatus.replace(/_/g, " ")}
+              </Tag>
             ) : null}
-          </aside>
+          </PropertyRow>
+          <PropertyRow icon={ICONS.branch} label="Branches" compact={compact}>
+            <Tag className="font-mono text-[13px]" title={mr.sourceBranch}>
+              {mr.sourceBranch}
+            </Tag>
+            <span className="text-muted-foreground">→</span>
+            <Tag className="font-mono text-[13px]" title={mr.targetBranch}>
+              {mr.targetBranch}
+            </Tag>
+          </PropertyRow>
+          <PropertyRow icon={ICONS.pipeline} label="Pipeline" compact={compact}>
+            {mr.pipeline === null ? (
+              <EmptyValue>No pipeline</EmptyValue>
+            ) : (
+              <PipelineStatus status={mr.pipeline.status} />
+            )}
+          </PropertyRow>
+          <PropertyRow icon={ICONS.check} label="Approvals" compact={compact}>
+            <span className="text-foreground">{approvalsText(mr)}</span>
+            {mr.approvedBy.map((username) => (
+              <Person key={username} username={username} />
+            ))}
+          </PropertyRow>
+          <PropertyRow icon={ICONS.users} label="Reviewers" compact={compact}>
+            {people(mr.reviewers)}
+          </PropertyRow>
+          <PropertyRow icon={ICONS.users} label="Assignee" compact={compact}>
+            {people(mr.assignees)}
+          </PropertyRow>
+          <PropertyRow icon={ICONS.list} label="Labels" compact={compact}>
+            {mr.labels.length === 0 ? <EmptyValue /> : <LabelTags labels={mr.labels} />}
+          </PropertyRow>
+          <PropertyRow icon={ICONS.user} label="Author" compact={compact}>
+            <Person username={mr.author} />
+          </PropertyRow>
+          <PropertyRow icon={ICONS.clock} label="Updated" compact={compact}>
+            {formatDateTime(mr.updatedAt)}
+          </PropertyRow>
+          {mrLinks !== undefined && mrLinks.length > 0 ? (
+            <PropertyRow icon={ICONS.bolt} label="Agents" compact={compact}>
+              <ThreadPills links={mrLinks} />
+            </PropertyRow>
+          ) : null}
         </div>
-      )}
+
+        <div className="pb-2 pt-1">
+          <PageComments
+            method="commentMergeRequest"
+            project={project}
+            iid={iid}
+            notes={mr.notes}
+            onPosted={load}
+          />
+        </div>
+        <div className="flex flex-col gap-4 border-t border-border/70 pt-6">
+          <PageBody16 body={mr.body} />
+          <div className="flex flex-col gap-1 pt-2">
+            <PipelineSection pipeline={mr.pipeline} jobs={mr.jobs} />
+            <DiscussionsSection discussions={mr.discussions} />
+            <ChangesSection mr={mr} />
+          </div>
+        </div>
+      </article>
     </div>
   );
 }
@@ -2159,8 +2503,46 @@ function MergeRequestDetailView({
 // ---------------------------------------------------------------------------
 // The thread side panel (threadPanelAction): auto-resolve the thread's own
 // merge request (its environment branch's, else the one it was spawned to
-// review) and show the compact view; fall back to a picker over open ones.
+// review) and show the compact page; fall back to a picker over open ones.
 // ---------------------------------------------------------------------------
+
+/** Notion's list view: page icon, title, properties on the right. */
+function ListRow({
+  title,
+  onOpen,
+  children,
+}: {
+  title: string;
+  onOpen: () => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") onOpen();
+      }}
+      className="group flex h-9 cursor-pointer items-center gap-2 rounded-md px-1.5 text-sm transition-colors hover:bg-state-hover"
+    >
+      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+        {title}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div className="flex flex-col gap-2 py-1">
+      <Skeleton className="h-5 w-full" />
+      <Skeleton className="h-5 w-5/6" />
+      <Skeleton className="h-5 w-2/3" />
+    </div>
+  );
+}
 
 function MergeRequestPickerList({
   onPick,
@@ -2168,46 +2550,25 @@ function MergeRequestPickerList({
   onPick: (project: string, iid: number) => void;
 }) {
   const { items, error } = useItems({ kind: "mr", state: "open" });
-  if (error !== null) return <EmptyState message={error} />;
-  if (items === null) {
-    return (
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-5 w-full" />
-        <Skeleton className="h-5 w-5/6" />
-        <Skeleton className="h-5 w-2/3" />
-      </div>
-    );
-  }
+  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (items === null) return <ListSkeleton />;
   if (items.length === 0) {
     return (
       <EmptyState message="No open merge requests in the tracked projects." />
     );
   }
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="divide-y divide-border">
-        {items.map((item) => (
-          <button
-            key={linkKey("mr", item.project, item.iid)}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/50"
-            onClick={() => onPick(item.project, item.iid)}
-          >
-            <StateDot state={item.state} draft={item.draft} />
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">
-              !{item.iid}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-              {item.title}
-            </span>
-            <span
-              className="hidden shrink-0 text-xs text-muted-foreground sm:block"
-              title={item.project}
-            >
-              {shortProject(item.project)}
-            </span>
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-col">
+      {items.map((item) => (
+        <ListRow
+          key={linkKey("mr", item.project, item.iid)}
+          title={item.title}
+          onOpen={() => onPick(item.project, item.iid)}
+        >
+          <span className="shrink-0 text-muted-foreground">!{item.iid}</span>
+          <StateStatus state={item.state} draft={item.draft} />
+        </ListRow>
+      ))}
     </div>
   );
 }
@@ -2237,12 +2598,12 @@ function MergeRequestPanelTab({ threadId }: PluginThreadPanelProps) {
     };
   }, [rpc, threadId]);
 
-  if (!resolved) return <DetailSkeleton />;
+  if (!resolved) return <PageSkeleton />;
   if (selected === null) {
     return (
-      <div className="flex flex-col gap-3">
-        <p className="text-xs text-muted-foreground">
-          No merge request is linked to this thread yet — pick one:
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-muted-foreground">
+          No merge request is linked to this thread yet. Pick one:
         </p>
         <MergeRequestPickerList
           onPick={(project, iid) => setSelected({ project, iid })}
@@ -2262,7 +2623,7 @@ function MergeRequestPanelTab({ threadId }: PluginThreadPanelProps) {
 }
 
 // ---------------------------------------------------------------------------
-// New issue form.
+// New issue: an empty Notion page.
 // ---------------------------------------------------------------------------
 
 function NewIssueForm({
@@ -2283,8 +2644,10 @@ function NewIssueForm({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [creating, setCreating] = useState(false);
+  const ready = !creating && title.trim().length > 0 && project.length > 0;
 
   const create = useCallback(() => {
+    if (!ready) return;
     setCreating(true);
     rpc
       .call("createIssue", { project, title, body })
@@ -2294,54 +2657,83 @@ function NewIssueForm({
       })
       .catch((err: unknown) => toast.error(errorText(err)))
       .finally(() => setCreating(false));
-  }, [rpc, project, title, body, onCreated]);
+  }, [rpc, ready, project, title, body, onCreated]);
+
+  const submitOnModEnter = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      create();
+    }
+  };
 
   return (
-    <div className="flex max-w-2xl flex-col gap-3">
-      <h2 className="text-lg font-semibold text-foreground">New issue</h2>
-      <Select value={project} onValueChange={setProject}>
-        <SelectTrigger className="w-full" aria-label="Project">
-          <SelectValue placeholder="Project" />
-        </SelectTrigger>
-        <SelectContent>
-          {projects.map((entry) => (
-            <SelectItem key={entry.project} value={entry.project}>
-              {entry.project}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Input
-        value={title}
-        onChange={(event) => setTitle(event.target.value)}
-        placeholder="Title"
-        aria-label="Issue title"
+    <div className="flex flex-col">
+      <PageTopBar
+        crumbs={[{ label: "Issues", onClick: onCancel }, { label: "New issue" }]}
+        actions={
+          <>
+            <GhostButton onClick={onCancel}>Cancel</GhostButton>
+            <PrimaryButton disabled={!ready} onClick={create} title="Create (⌘/Ctrl+Enter)">
+              {creating ? "Creating…" : "Create"}
+            </PrimaryButton>
+          </>
+        }
       />
-      <Textarea
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        placeholder="Description (markdown)"
-        aria-label="Issue description"
-        rows={8}
-      />
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          disabled={creating || title.trim().length === 0 || project.length === 0}
-          onClick={create}
-        >
-          {creating ? "Creating…" : "Create issue"}
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
+      <article className="mx-auto w-full max-w-[708px] pt-12">
+        <input
+          type="text"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          onKeyDown={submitOnModEnter}
+          placeholder="Untitled"
+          aria-label="Issue title"
+          autoFocus
+          className="w-full border-none bg-transparent pb-2 text-[40px] font-bold leading-[1.2] text-foreground placeholder:text-muted-foreground/30 focus:outline-none"
+        />
+        <div className="flex flex-col gap-0.5 py-1.5">
+          <PropertyRow
+            icon={ICONS.folder}
+            label="Project"
+            control={
+              <Select value={project} onValueChange={setProject}>
+                <SelectTrigger
+                  className={cn(
+                    PROPERTY_CONTROL_CLASS,
+                    "h-auto w-auto justify-start border-none bg-transparent shadow-none focus:ring-0 [&>svg]:hidden",
+                  )}
+                  aria-label="Project"
+                >
+                  <SelectValue placeholder="Empty" />
+                </SelectTrigger>
+                <SelectContent>
+                  {projects.map((entry) => (
+                    <SelectItem key={entry.project} value={entry.project}>
+                      {entry.project}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            }
+          />
+        </div>
+        <div className="mt-2 border-t border-border/70 pt-6">
+          <Textarea
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            onKeyDown={submitOnModEnter}
+            placeholder="Write a description in Markdown…"
+            aria-label="Issue description"
+            rows={12}
+            className="resize-none border-none bg-transparent px-0 py-0 text-base leading-normal shadow-none placeholder:text-muted-foreground/50 focus-visible:ring-0"
+          />
+        </div>
+      </article>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// The panel: header, tabs, filters, routed body.
+// The panel: header content, the glab banner, routed body.
 // ---------------------------------------------------------------------------
 
 function PanelHeader() {
@@ -2374,122 +2766,67 @@ function PanelHeader() {
       </span>
       <Button
         size="sm"
-        variant="outline"
-        className="size-8 gap-1.5 px-0 sm:h-8 sm:w-auto sm:px-3"
+        variant="ghost"
+        className="size-7 gap-1.5 px-0 text-xs text-muted-foreground hover:text-foreground sm:h-7 sm:w-auto sm:px-2.5"
         disabled={syncing}
         onClick={refresh}
         aria-label={syncing ? "Syncing GitLab data" : "Refresh GitLab data"}
       >
         <RefreshIcon className={syncing ? "animate-spin" : undefined} />
         <span className="hidden sm:inline">
-          {syncing ? "Syncing…" : "Refresh"}
+          {syncing ? "Syncing…" : "Sync"}
         </span>
       </Button>
     </>
   );
 }
 
+function RefreshIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M21 12a9 9 0 0 0-15.2-6.5L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 15.2 6.5L21 16" />
+      <path d="M16 16h5v5" />
+    </svg>
+  );
+}
+
 const QUERY_KEY = "bb-plugin-gitlab:query";
 const DEFAULT_QUERY = "is:open ";
 
-function ListView({
-  kind,
-  projects,
-  query,
-  onQuery,
-  onOpenItem,
-}: {
-  kind: Kind;
-  projects: ProjectInfo[];
-  query: string;
-  onQuery: (query: string) => void;
-  onOpenItem: (project: string, iid: number) => void;
-}) {
-  const { items, error } = useItems({ kind });
-  const viewer = useViewer();
-  const parsed = useMemo(() => parseItemQuery(query), [query]);
-  const filtered = useMemo(
-    () =>
-      items === null
-        ? null
-        : items.filter((item) => matchesItemQuery(item, parsed, viewer)),
-    [items, parsed, viewer],
-  );
-
-  return (
-    <>
-      <FilterBar
-        kind={kind}
-        projects={projects}
-        items={items}
-        value={query}
-        onChange={onQuery}
-      />
-      <ItemsList
-        kind={kind}
-        items={filtered}
-        error={error}
-        hasFilter={query.trim().length > 0}
-        onOpenItem={onOpenItem}
-      />
-    </>
-  );
-}
-
-/**
- * Shown whenever `glab` is missing or logged out. It sits above the panel
- * instead of replacing it: the cache still has issues and merge requests worth
- * reading, only writes and detail views need a working CLI.
- */
+/** Shown whenever `glab` is missing or logged out. */
 function StatusBanner({ error }: { error: string | null }) {
   return (
-    <div
-      role="status"
-      className="flex flex-col gap-1 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2"
-    >
-      <p className="text-sm font-medium text-foreground">
+    <Callout icon="⚠️" className="mb-6">
+      <p className="font-medium text-foreground">
         The GitLab CLI is not available or not authenticated
       </p>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-muted-foreground">
         Install glab from gitlab.com/gitlab-org/cli, run{" "}
-        <span className="font-mono">glab auth login</span>, then reload the
-        plugin. Cached items stay readable; edits will fail until then.
+        <code className="rounded bg-foreground/[0.06] px-1 py-0.5 font-mono text-[13px] text-foreground">
+          glab auth login
+        </code>
+        , then reload the plugin. Cached items stay readable; edits fail until
+        then.
       </p>
       {error !== null && error.length > 0 ? (
-        <p className="whitespace-pre-wrap font-mono text-xs text-destructive">
+        <p className="whitespace-pre-wrap pt-1 font-mono text-xs text-red-700 [.dark_&]:text-red-400">
           {error}
         </p>
       ) : null}
-    </div>
-  );
-}
-
-function GitlabPanelBody({
-  route,
-  navigate,
-  status,
-  query,
-  onQuery,
-}: {
-  route: Route;
-  navigate: (route: Route) => void;
-  status: Status | null;
-  query: string;
-  onQuery: (query: string) => void;
-}) {
-  return (
-    <>
-      {status !== null && !status.glabOk ? (
-        <StatusBanner error={status.glabError} />
-      ) : null}
-      <GitlabRoutedBody
-        route={route}
-        navigate={navigate}
-        status={status}
-        query={query}
-        onQuery={onQuery}
-      />
-    </>
+    </Callout>
   );
 }
 
@@ -2509,10 +2846,13 @@ function GitlabRoutedBody({
   const projects = status?.projects ?? [];
   if (status !== null && status.projects.length === 0) {
     return (
-      <EmptyState message="No GitLab projects tracked yet. Create a BB project whose checkout has a GitLab origin remote, or add projects via the extraProjects plugin setting." />
+      <Callout icon="💡">
+        No GitLab projects tracked yet. Create a BB project whose checkout has a
+        GitLab origin remote, or add projects with the extraProjects plugin
+        setting.
+      </Callout>
     );
   }
-
   if (route.view === "issue") {
     return (
       <IssueDetailView
@@ -2550,48 +2890,14 @@ function GitlabRoutedBody({
       />
     );
   }
-
-  const kind: Kind = route.view === "merge_requests" ? "mr" : "issue";
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <Tabs
-          value={route.view}
-          onValueChange={(value) =>
-            navigate(
-              value === "merge_requests"
-                ? { view: "merge_requests" }
-                : { view: "issues" },
-            )
-          }
-        >
-          <TabsList>
-            <TabsTrigger value="issues">Issues</TabsTrigger>
-            <TabsTrigger value="merge_requests">Merge requests</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <div className="flex-1" />
-        {route.view === "issues" ? (
-          <Button size="sm" onClick={() => navigate({ view: "new" })}>
-            New issue
-          </Button>
-        ) : null}
-      </div>
-
-      <ListView
-        kind={kind}
-        projects={projects}
-        query={query}
-        onQuery={onQuery}
-        onOpenItem={(project, iid) =>
-          navigate(
-            kind === "mr"
-              ? { view: "merge_request", project, iid }
-              : { view: "issue", project, iid },
-          )
-        }
-      />
-    </div>
+    <DatabaseView
+      route={route}
+      navigate={navigate}
+      projects={projects}
+      query={query}
+      onQuery={onQuery}
+    />
   );
 }
 
@@ -2614,23 +2920,24 @@ function GitlabPanel({ subPath }: PluginNavPanelProps) {
     }
   }, []);
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4 md:p-5">
-      <PageBody className="max-w-5xl">
-        <GitlabPanelBody
-          route={route}
-          navigate={navigate}
-          status={status}
-          query={query}
-          onQuery={setQuery}
-        />
-      </PageBody>
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-24 pt-3 sm:px-8 xl:px-12 2xl:px-24">
+      {status !== null && !status.glabOk ? (
+        <StatusBanner error={status.glabError} />
+      ) : null}
+      <GitlabRoutedBody
+        route={route}
+        navigate={navigate}
+        status={status}
+        query={query}
+        onQuery={setQuery}
+      />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Homepage section: the newest open issues, scoped to the project in view
-// when that project has a GitLab remote.
+// Homepage section: the newest open issues as a Notion list, scoped to the
+// project in view when that project has a GitLab remote.
 // ---------------------------------------------------------------------------
 
 const HOMEPAGE_ROWS = 5;
@@ -2652,68 +2959,46 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
     state: "open",
   });
 
-  if (error !== null) return <EmptyState message={error} />;
-  if (items === null) {
-    return (
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-5 w-full" />
-        <Skeleton className="h-5 w-5/6" />
-        <Skeleton className="h-5 w-2/3" />
-      </div>
-    );
-  }
+  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (items === null) return <ListSkeleton />;
   if (items.length === 0) {
     return <EmptyState message="No open GitLab issues." className="py-6" />;
   }
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="divide-y divide-border">
-        {items.slice(0, HOMEPAGE_ROWS).map((item) => (
-          <div
-            key={linkKey("issue", item.project, item.iid)}
-            className="flex items-center gap-2 px-3 py-2"
+    <div className="flex flex-col">
+      {items.slice(0, HOMEPAGE_ROWS).map((item) => (
+        <ListRow
+          key={linkKey("issue", item.project, item.iid)}
+          title={item.title}
+          onOpen={() =>
+            navigate.toPluginPanel(PANEL_PATH, {
+              subPath: routeToSubPath({
+                view: "issue",
+                project: item.project,
+                iid: item.iid,
+              }),
+            })
+          }
+        >
+          <span className="shrink-0 text-muted-foreground">#{item.iid}</span>
+          <span className="hidden shrink-0 items-center gap-1.5 sm:flex">
+            <LabelTags labels={item.labels} max={2} />
+          </span>
+          <ChipButton
+            className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            disabled={spawningKey !== null}
+            aria-label={`Send agent to issue #${item.iid}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              spawn("issue", item.project, item.iid);
+            }}
           >
-            <StateDot state={item.state} />
-            <button
-              className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              onClick={() =>
-                navigate.toPluginPanel(PANEL_PATH, {
-                  subPath: routeToSubPath({
-                    view: "issue",
-                    project: item.project,
-                    iid: item.iid,
-                  }),
-                })
-              }
-            >
-              <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                #{item.iid}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-                {item.title}
-              </span>
-              <span
-                className="hidden shrink-0 text-xs text-muted-foreground sm:block"
-                title={item.project}
-              >
-                {shortProject(item.project)}
-              </span>
-            </button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 shrink-0"
-              disabled={spawningKey !== null}
-              aria-label={`Send agent to issue #${item.iid}`}
-              onClick={() => spawn("issue", item.project, item.iid)}
-            >
-              {spawningKey === linkKey("issue", item.project, item.iid)
-                ? "…"
-                : "Send agent"}
-            </Button>
-          </div>
-        ))}
-      </div>
+            {spawningKey === linkKey("issue", item.project, item.iid)
+              ? "…"
+              : "⚡ AGENT"}
+          </ChipButton>
+        </ListRow>
+      ))}
     </div>
   );
 }

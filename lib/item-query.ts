@@ -249,3 +249,77 @@ export function queryProject(
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Editing a query token by token. The filter pills and the search box both
+// rewrite the one query string through these, so the query stays the single
+// source of truth (and keeps persisting the way it always has).
+// ---------------------------------------------------------------------------
+
+export interface QueryToken {
+  /** Lowercased qualifier key, `state` folded into `is`; "" for plain text. */
+  key: string;
+  /** The unquoted value; for plain text, the whole token. */
+  value: string;
+  raw: string;
+}
+
+export function queryTokens(query: string): QueryToken[] {
+  return (query.match(TOKEN) ?? []).map((raw) => {
+    const idx = raw.indexOf(":");
+    if (idx <= 0) return { key: "", value: unquote(raw), raw };
+    const key = raw.slice(0, idx).toLowerCase();
+    return { key: key === "state" ? "is" : key, value: unquote(raw.slice(idx + 1)), raw };
+  });
+}
+
+/** `key:value`, quoted when the value has whitespace. */
+export function formatQualifier(key: string, value: string): string {
+  return /\s/.test(value) ? `${key}:"${value}"` : `${key}:${value}`;
+}
+
+function joinTokens(tokens: string[]): string {
+  return tokens.length === 0 ? "" : `${tokens.join(" ")} `;
+}
+
+/** Drops every qualifier token the predicate matches; text is kept. */
+export function withoutQualifiers(
+  query: string,
+  match: (key: string, value: string) => boolean,
+): string {
+  return joinTokens(
+    queryTokens(query)
+      .filter((token) => token.key === "" || !match(token.key, token.value))
+      .map((token) => token.raw),
+  );
+}
+
+/** Adds `key:value` unless an equal qualifier (case-insensitive) is present. */
+export function withQualifier(query: string, key: string, value: string): string {
+  const tokens = queryTokens(query);
+  const present = tokens.some(
+    (token) =>
+      token.key === key && token.value.toLowerCase() === value.toLowerCase(),
+  );
+  if (present) return query;
+  return joinTokens([...tokens.map((token) => token.raw), formatQualifier(key, value)]);
+}
+
+/** The plain-text part of a query, as the search box shows it. */
+export function queryText(query: string): string {
+  return queryTokens(query)
+    .filter((token) => token.key === "")
+    .map((token) => token.raw)
+    .join(" ");
+}
+
+/**
+ * Replaces the plain-text part, keeping every qualifier. Qualifiers typed into
+ * the search box survive as qualifiers, so `label:bug` there becomes a pill.
+ */
+export function withQueryText(query: string, text: string): string {
+  const qualifiers = queryTokens(query)
+    .filter((token) => token.key !== "")
+    .map((token) => token.raw);
+  return joinTokens([...qualifiers, ...(text.match(TOKEN) ?? [])]);
+}
