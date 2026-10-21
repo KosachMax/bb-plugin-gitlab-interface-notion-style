@@ -6,8 +6,6 @@ Work through GitLab issues, merge requests, pipelines and branches in a BB panel
 
 Each merge request opens on a readiness strip: review, pipeline, open threads and conflicts, with the reason it is blocked spelled out. Approvals and 👍 reactions both count as review. Reply to a thread or resolve it in place, read the diff, and merge from the panel. A merge is pinned to the commit you looked at, so a branch updated in the meantime is refused instead of merged.
 
-![Merge request](../screenshots/gitlab-interface-notion-style/merge-request.png)
-
 ## Lists and filters
 
 Issues and merge requests sit in one table with assignee, reviewer and label columns. Filter menus search every project member and label, not only the first few.
