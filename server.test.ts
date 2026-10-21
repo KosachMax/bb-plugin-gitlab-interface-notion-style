@@ -219,7 +219,7 @@ describe("glab plumbing", () => {
   });
 });
 
-describe("bb gitlab argument parsing", () => {
+describe("bb gitlab-ui argument parsing", () => {
   it("parses list filters, with repeatable labels and both flag forms", () => {
     expect(
       parseGitlabCliArgs([
@@ -339,7 +339,7 @@ describe("bb gitlab argument parsing", () => {
   });
 });
 
-describe("bb gitlab targets", () => {
+describe("bb gitlab-ui targets", () => {
   it("reads host-qualified issue and merge-request refs", () => {
     expect(parseGitlabTarget("gitlab.com/group/sub/app#7", HOSTS, "gitlab.com")).toEqual({
       kind: "issue",

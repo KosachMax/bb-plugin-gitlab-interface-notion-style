@@ -1,14 +1,12 @@
-# bb-plugin-gitlab (fork)
+# GitLab Interface (Notion style)
 
 GitLab issues and merge requests inside [BB](https://getbb.app), with one-click
 agent dispatch. Self-managed instances are first-class: every host `glab` is
 logged into is a host this plugin can reach.
 
-This is a fork of [suiramdev/bb-plugin-gitlab](https://github.com/suiramdev/bb-plugin-gitlab).
-It keeps the original panel, agent dispatch, and mentions, and adds a fuller
-`bb gitlab` CLI and a Notion-style interface.
+A Notion-style panel for GitLab, with a `bb gitlab-ui` CLI for agents and terminals.
 
-## What this fork adds
+## Features
 
 - **A Notion-style panel.** Issues, merge requests, pipelines, and branches are
   four views of one database: view tabs, filter pills, inline search,
@@ -57,24 +55,23 @@ Not here yet: ahead/behind counts and a dedicated page per branch.
 
 ## Install
 
+The plugin id is `gitlab-interface-notion-style` and its command is `bb gitlab-ui`.
+
 ```sh
-bb plugin install git:https://github.com/KosachMax/bb-plugin-gitlab.git@cli-commands
+bb plugin install git:https://github.com/KosachMax/bb-plugin-gitlab-interface-notion-style.git
 ```
 
 or from a local checkout, which is what you want while hacking on it:
 
 ```sh
-git clone https://github.com/KosachMax/bb-plugin-gitlab.git
-cd bb-plugin-gitlab && npm install --include=dev && bb plugin build
+git clone https://github.com/KosachMax/bb-plugin-gitlab-interface-notion-style.git
+cd bb-plugin-gitlab-interface-notion-style && npm install --include=dev && bb plugin build
 bb plugin install "$PWD"
 ```
 
-## Relation to upstream
+## License
 
-The fork is based on upstream `v0.1.2`. Upstream has since split `server.ts`
-into modules and moved to GraphQL, so these changes are not a clean merge; they
-would need porting before an upstream pull request. The upstream license (MIT)
-and attribution are unchanged.
+MIT. The code started from Marius Nouchet's MIT-licensed GitLab plugin for BB, so the original copyright notice stays in `LICENSE`.
 
 ## What it does
 
@@ -101,7 +98,7 @@ and attribution are unchanged.
 - **Mentions**: `#` completes GitLab issues, `!` completes merge requests (`@`
   does both); the selected item's title, state, and description are attached as
   agent context at send time.
-- **`bb gitlab` CLI**, also discoverable by agents through the plugin-commands
+- **`bb gitlab-ui` CLI**, also discoverable by agents through the plugin-commands
   skill, alongside the bundled `gitlab` skill that teaches `glab` conventions:
   - `projects`, `sync`
   - `issues` / `mrs [project]` with `--state open|closed|merged|all`, `--mine`,
@@ -172,7 +169,7 @@ bb plugin reload gitlab
 ```
 
 A background service refreshes the issue/MR cache every 5 minutes; the panel's
-Refresh button (or `bb gitlab sync`) forces it. The cache holds open items plus
+Refresh button (or `bb gitlab-ui sync`) forces it. The cache holds open items plus
 a page of recently closed and merged ones, and the panel filters that cache in
 the browser, so `is:closed` or `is:merged` costs nothing. Detail views,
 mutations, and mention resolution always go live through `glab api`.

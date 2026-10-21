@@ -1,16 +1,16 @@
 {
-  "name": "bb-plugin-gitlab",
-  "version": "0.1.2",
+  "name": "bb-plugin-gitlab-interface-notion-style",
+  "version": "0.2.0",
   "description": "Browse GitLab issues and merge requests in BB, then send them to agents.",
   "license": "MIT",
-  "author": "Marius Nouchet (https://github.com/suiramdev)",
-  "homepage": "https://github.com/suiramdev/bb-plugin-gitlab#readme",
+  "author": "Max Kosach (https://github.com/KosachMax), based on work by Marius Nouchet (https://github.com/suiramdev)",
+  "homepage": "https://github.com/KosachMax/bb-plugin-gitlab-interface-notion-style#readme",
   "bugs": {
-    "url": "https://github.com/suiramdev/bb-plugin-gitlab/issues"
+    "url": "https://github.com/KosachMax/bb-plugin-gitlab-interface-notion-style/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/suiramdev/bb-plugin-gitlab.git"
+    "url": "git+https://github.com/KosachMax/bb-plugin-gitlab-interface-notion-style.git"
   },
   "type": "module",
   "engines": {
@@ -18,7 +18,7 @@
     "bbPluginSdk": ">=0.4.6"
   },
   "bb": {
-    "name": "GitLab",
+    "name": "GitLab Interface (Notion style)",
     "description": "Browse GitLab issues and merge requests in BB, then send them to agents.",
     "branding": {
       "icon": "./assets/icon.svg"

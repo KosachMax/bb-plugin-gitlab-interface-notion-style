@@ -1,4 +1,4 @@
-// bb-plugin-gitlab — the frontend bundle.
+// GitLab Interface (Notion style) — the frontend bundle.
 //
 // A GitLab panel shaped like a Notion database. Issues and merge requests are
 // two views of one table: Notion's view tabs, a toolbar with filter pills and
@@ -299,7 +299,7 @@ function errorText(error: unknown): string {
 // last route survives reloads (localStorage); the rest lives for the session.
 // ---------------------------------------------------------------------------
 
-const ROUTE_KEY = "bb-plugin-gitlab:route";
+const ROUTE_KEY = "gitlab-ui:route";
 const stickyStore = new Map<string, unknown>();
 
 function readStored(key: string): string | null {
@@ -372,7 +372,7 @@ function shortProject(project: string): string {
 // back/forward walks panel history.
 // ---------------------------------------------------------------------------
 
-const PANEL_PATH = "gitlab";
+const PANEL_PATH = "gitlab-ui";
 
 type Route =
   | { view: "issues" }
@@ -5188,7 +5188,7 @@ function RefreshIcon({ className }: { className?: string }) {
   );
 }
 
-const QUERY_KEY = "bb-plugin-gitlab:query";
+const QUERY_KEY = "gitlab-ui:query";
 const DEFAULT_QUERY = "is:open ";
 
 /** Shown whenever `glab` is missing or logged out. */
@@ -5450,7 +5450,7 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
-    id: "gitlab",
+    id: "gitlab-ui",
     title: "GitLab",
     icon: "GitMerge",
     path: PANEL_PATH,
@@ -5458,7 +5458,7 @@ export default definePluginApp((app) => {
     headerContent: PanelHeader,
   });
   app.slots.homepageSection({
-    id: "gitlab-issues",
+    id: "gitlab-ui-issues",
     title: "GitLab issues",
     component: (props: PluginHomepageSectionProps) => (
       <ViewerScope>

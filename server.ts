@@ -1,4 +1,4 @@
-// bb-plugin-gitlab — GitLab issues & merge requests inside BB.
+// GitLab Interface (Notion style) — GitLab issues & merge requests inside BB.
 //
 // Auth rides on the GitLab CLI: every host `glab auth status` reports as
 // logged in is a host this plugin can reach, so self-managed instances work
@@ -1014,7 +1014,7 @@ export function countDiffLines(diff: string): {
 }
 
 // ---------------------------------------------------------------------------
-// `bb gitlab` argument parsing. Pure, so the shape of every subcommand is
+// `bb gitlab-ui` argument parsing. Pure, so the shape of every subcommand is
 // testable without glab; resolving a target against the authenticated hosts
 // happens at run time (parseGitlabTarget).
 // ---------------------------------------------------------------------------
@@ -1059,7 +1059,7 @@ export type GitlabCliCommand =
   | ({ sub: "retry"; job: string | null } & GitlabPipelineSelector)
   | { sub: "run"; target: string | null; ref: string | null };
 
-/** Lines of each failed job's log `bb gitlab pipeline` prints by default. */
+/** Lines of each failed job's log `bb gitlab-ui pipeline` prints by default. */
 export const DEFAULT_JOB_LOG_LINES = 30;
 
 interface FlagSpec {
@@ -1151,7 +1151,7 @@ export function parseGitlabCliArgs(
     const [target, ...words] = args;
     const body = words.join(" ").trim();
     if (target === undefined || body.length === 0) {
-      return { error: "Usage: bb gitlab comment <issue-or-mr> <text…>" };
+      return { error: "Usage: bb gitlab-ui comment <issue-or-mr> <text…>" };
     }
     return { sub: "comment", target, body };
   }
@@ -1240,7 +1240,7 @@ export function parseGitlabCliArgs(
     }
     case "show":
       if (target === null) {
-        return { error: "Usage: bb gitlab show <issue-or-mr>" };
+        return { error: "Usage: bb gitlab-ui show <issue-or-mr>" };
       }
       return { sub, target, json: booleans.has("json") };
     case "pipeline":
@@ -1275,7 +1275,7 @@ export function validateGitlabCliArgs(argv: string[]): string | null {
   return "error" in parsed ? parsed.error : null;
 }
 
-/** What a `bb gitlab` target names, once resolved against glab's hosts. */
+/** What a `bb gitlab-ui` target names, once resolved against glab's hosts. */
 export type GitlabTarget =
   | { kind: "project"; project: string }
   | { kind: "issue" | "mr"; project: string; iid: number }
@@ -2981,19 +2981,19 @@ export default async function plugin(bb: BbPluginApi) {
 
 
   // ------------------------------------------------------------------
-  // CLI: `bb gitlab …` for agents and terminals.
+  // CLI: `bb gitlab-ui …` for agents and terminals.
   // ------------------------------------------------------------------
   const USAGE = [
     "Usage:",
-    "  bb gitlab projects [--json]                List tracked GitLab projects",
-    "  bb gitlab issues [project] [filters]       List cached issues",
-    "  bb gitlab mrs [project] [filters]          List cached merge requests",
-    "  bb gitlab sync                             Refresh the cache from GitLab now",
-    "  bb gitlab show <item> [--json]             Issue or MR detail with comments (live)",
-    "  bb gitlab comment <item> <text…>           Add a comment to an issue or MR",
-    "  bb gitlab pipeline [target] [options]      Pipeline status, jobs, failed-job logs",
-    "  bb gitlab retry [target] [options]         Retry failed jobs, or one job with --job",
-    "  bb gitlab run [target] [--ref <branch>]    Start a new pipeline",
+    "  bb gitlab-ui projects [--json]                List tracked GitLab projects",
+    "  bb gitlab-ui issues [project] [filters]       List cached issues",
+    "  bb gitlab-ui mrs [project] [filters]          List cached merge requests",
+    "  bb gitlab-ui sync                             Refresh the cache from GitLab now",
+    "  bb gitlab-ui show <item> [--json]             Issue or MR detail with comments (live)",
+    "  bb gitlab-ui comment <item> <text…>           Add a comment to an issue or MR",
+    "  bb gitlab-ui pipeline [target] [options]      Pipeline status, jobs, failed-job logs",
+    "  bb gitlab-ui retry [target] [options]         Retry failed jobs, or one job with --job",
+    "  bb gitlab-ui run [target] [--ref <branch>]    Start a new pipeline",
     "",
     "List filters (issues, mrs):",
     "  --state open|closed|merged|all   default open; merged is MRs only",
@@ -3246,7 +3246,7 @@ export default async function plugin(bb: BbPluginApi) {
       pipelineId = mr.head_pipeline?.id ?? null;
       if (pipelineId === null) {
         throw new Error(
-          `${project}!${target.iid} has no pipeline yet. Start one with \`bb gitlab run\`.`,
+          `${project}!${target.iid} has no pipeline yet. Start one with \`bb gitlab-ui run\`.`,
         );
       }
     }
@@ -3286,7 +3286,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // -------------------------------------------------------------------
-  // Pipeline core: one implementation behind both `bb gitlab` and the
+  // Pipeline core: one implementation behind both `bb gitlab-ui` and the
   // panel's rpc methods, so the write paths are exercised by either.
   // -------------------------------------------------------------------
 
@@ -3404,7 +3404,7 @@ export default async function plugin(bb: BbPluginApi) {
       .sort((left, right) => left.id - right.id);
   }
 
-  /** Jobs whose logs `bb gitlab pipeline` prints, so output stays bounded. */
+  /** Jobs whose logs `bb gitlab-ui pipeline` prints, so output stays bounded. */
   const MAX_LOGGED_JOBS = 5;
 
   async function cliPipeline(
@@ -3490,7 +3490,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (failed.length > MAX_LOGGED_JOBS && command.logs > 0) {
       sections.push(
         `${failed.length - MAX_LOGGED_JOBS} more failed job(s) not shown; ` +
-          "read one with `bb gitlab pipeline <job URL>` or glab.",
+          "read one with `bb gitlab-ui pipeline <job URL>` or glab.",
       );
     }
     return sections.join("\n\n");
@@ -3535,7 +3535,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (retryable.length === 0) {
       return (
         `Nothing to retry: pipeline #${pipeline.id} (${pipeline.status}) has no ` +
-        "failed or canceled jobs. Start a fresh one with `bb gitlab run`."
+        "failed or canceled jobs. Start a fresh one with `bb gitlab-ui run`."
       );
     }
     const { pipeline: retried } = await coreRetryPipeline(project, pipeline.id);
@@ -3565,7 +3565,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (target.kind !== "project") {
       throw new Error(
-        "`run` takes a project or a merge request; to re-run an existing pipeline use `bb gitlab retry`.",
+        "`run` takes a project or a merge request; to re-run an existing pipeline use `bb gitlab-ui retry`.",
       );
     }
     const { pipeline, ref } = await coreRunPipeline(target.project, {
@@ -3585,7 +3585,7 @@ export default async function plugin(bb: BbPluginApi) {
       project: command.project ?? undefined,
     });
     if (cached.length === 0) {
-      return "Nothing cached. Run `bb gitlab sync` first.";
+      return "Nothing cached. Run `bb gitlab-ui sync` first.";
     }
 
     // "@me" is per host: the glab user can differ between instances.
@@ -3664,61 +3664,61 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.cli.register({
-    name: "gitlab",
+    name: "gitlab-ui",
     summary: "Browse tracked GitLab projects, issues, merge requests, and pipelines",
     commands: [
       {
         name: "projects",
         summary: "List tracked GitLab projects",
-        usage: "bb gitlab projects [--json]",
+        usage: "bb gitlab-ui projects [--json]",
       },
       {
         name: "issues",
         summary: "List cached issues, filtered by state, author, assignee, label",
         usage:
-          "bb gitlab issues [host/group/project] [--state open|closed|all] [--mine] " +
+          "bb gitlab-ui issues [host/group/project] [--state open|closed|all] [--mine] " +
           "[--author <user|@me>] [--assignee <user|@me>] [--label <name>]... [--limit <n>] [--json]",
       },
       {
         name: "mrs",
         summary: "List cached merge requests, filtered by state, author, assignee, label, draft",
         usage:
-          "bb gitlab mrs [host/group/project] [--state open|closed|merged|all] [--mine] " +
+          "bb gitlab-ui mrs [host/group/project] [--state open|closed|merged|all] [--mine] " +
           "[--author <user|@me>] [--assignee <user|@me>] [--reviewer <user|@me>] [--label <name>]... [--draft] [--limit <n>] [--json]",
       },
       {
         name: "sync",
         summary: "Refresh the cache from GitLab now",
-        usage: "bb gitlab sync",
+        usage: "bb gitlab-ui sync",
       },
       {
         name: "show",
         summary: "Show an issue or merge request live, with its comments",
-        usage: "bb gitlab show <host/group/project#iid | host/group/project!iid | URL> [--json]",
+        usage: "bb gitlab-ui show <host/group/project#iid | host/group/project!iid | URL> [--json]",
       },
       {
         name: "comment",
         summary: "Add a comment to an issue or merge request",
-        usage: "bb gitlab comment <host/group/project#iid | host/group/project!iid | URL> <text…>",
+        usage: "bb gitlab-ui comment <host/group/project#iid | host/group/project!iid | URL> <text…>",
       },
       {
         name: "pipeline",
         summary: "Show a pipeline's status and jobs, with the tail of failed-job logs",
         usage:
-          "bb gitlab pipeline [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
+          "bb gitlab-ui pipeline [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
           "[--logs <n>] [--json]",
       },
       {
         name: "retry",
         summary: "Retry a pipeline's failed jobs, or one job with --job",
         usage:
-          "bb gitlab retry [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
+          "bb gitlab-ui retry [project | MR | pipeline/job URL] [--ref <branch> | --pipeline <id>] " +
           "[--job <id|name>]",
       },
       {
         name: "run",
         summary: "Start a new pipeline on a branch or for a merge request",
-        usage: "bb gitlab run [project | MR] [--ref <branch>]",
+        usage: "bb gitlab-ui run [project | MR] [--ref <branch>]",
       },
     ],
     async run(argv, ctx) {
