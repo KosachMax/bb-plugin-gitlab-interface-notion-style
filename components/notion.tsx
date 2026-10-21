@@ -76,14 +76,16 @@ export function colorForName(name: string): NotionColor {
   return HASHED_COLORS[Math.abs(hash) % HASHED_COLORS.length];
 }
 
-/** A select / multi-select option. */
+/** A select / multi-select option; `dot` adds a leading color dot ("#rrggbb" or a hue). */
 export function Tag({
   color = "default",
+  dot,
   className,
   children,
   title,
 }: {
   color?: NotionColor;
+  dot?: string | NotionColor;
   className?: string;
   children: React.ReactNode;
   title?: string;
@@ -92,11 +94,21 @@ export function Tag({
     <span
       title={title}
       className={cn(
-        "inline-flex h-5 min-w-0 shrink-0 items-center whitespace-nowrap rounded px-1.5 text-sm leading-5",
+        "inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-1.5 text-sm leading-5",
         TAG_CLASSES[color],
         className,
       )}
     >
+      {dot !== undefined ? (
+        <span
+          aria-hidden="true"
+          className={cn(
+            "size-2 shrink-0 rounded-full",
+            !dot.startsWith("#") && DOT_CLASSES[dot as NotionColor],
+          )}
+          style={dot.startsWith("#") ? { backgroundColor: dot } : undefined}
+        />
+      ) : null}
       <span className="min-w-0 truncate">{children}</span>
     </span>
   );
@@ -108,17 +120,23 @@ export function StatusPill({
   children,
   className,
   pulse = false,
+  quiet = false,
 }: {
   color: NotionColor;
   children: React.ReactNode;
   className?: string;
   pulse?: boolean;
+  /**
+   * The expected state (open, passed): a dot and plain text, no fill, so the
+   * rows that need attention are the only ones with color behind them.
+   */
+  quiet?: boolean;
 }) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full pl-1.5 pr-2 text-sm leading-5",
-        TAG_CLASSES[color],
+        "inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full text-sm leading-5",
+        quiet ? "pl-0.5 pr-1 text-foreground" : cn("pl-1.5 pr-2", TAG_CLASSES[color]),
         className,
       )}
     >
@@ -167,6 +185,7 @@ export const ICONS = {
   chevronRight: "m9 18 6-6-6-6",
   close: "M18 6 6 18M6 6l12 12",
   pipeline: "M5 12h14M12 5l7 7-7 7",
+  commit: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 12h6M15 12h6",
   comment: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
 } as const;
@@ -448,7 +467,48 @@ export const FilterPill = React.forwardRef<
 ));
 FilterPill.displayName = "FilterPill";
 
-/** Notion's 20px round avatar; initials because GitLab avatars need auth. */
+/** One tinted background per person, so neighbors in a list are easy to tell apart. */
+const AVATAR_CLASSES = [
+  "bg-blue-500/25 text-blue-900 [.dark_&]:bg-blue-400/35 [.dark_&]:text-blue-50",
+  "bg-emerald-500/25 text-emerald-900 [.dark_&]:bg-emerald-400/35 [.dark_&]:text-emerald-50",
+  "bg-purple-500/25 text-purple-900 [.dark_&]:bg-purple-400/35 [.dark_&]:text-purple-50",
+  "bg-pink-500/25 text-pink-900 [.dark_&]:bg-pink-400/35 [.dark_&]:text-pink-50",
+  "bg-orange-500/25 text-orange-900 [.dark_&]:bg-orange-400/35 [.dark_&]:text-orange-50",
+  "bg-yellow-500/35 text-yellow-900 [.dark_&]:bg-yellow-400/40 [.dark_&]:text-yellow-50",
+  "bg-red-500/25 text-red-900 [.dark_&]:bg-red-400/35 [.dark_&]:text-red-50",
+  "bg-cyan-500/25 text-cyan-900 [.dark_&]:bg-cyan-400/35 [.dark_&]:text-cyan-50",
+  "bg-indigo-500/25 text-indigo-900 [.dark_&]:bg-indigo-400/35 [.dark_&]:text-indigo-50",
+  "bg-amber-700/25 text-amber-950 [.dark_&]:bg-amber-500/35 [.dark_&]:text-amber-50",
+  "bg-lime-600/30 text-lime-950 [.dark_&]:bg-lime-400/35 [.dark_&]:text-lime-50",
+  "bg-fuchsia-500/25 text-fuchsia-900 [.dark_&]:bg-fuchsia-400/35 [.dark_&]:text-fuchsia-50",
+  "bg-teal-500/25 text-teal-900 [.dark_&]:bg-teal-400/35 [.dark_&]:text-teal-50",
+  "bg-slate-500/30 text-slate-900 [.dark_&]:bg-slate-400/35 [.dark_&]:text-slate-50",
+];
+
+function hashName(name: string): number {
+  // FNV-1a: neighbors like "Alek.Demin" and "AlekseyGoncharov" still spread out.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < name.length; index += 1) {
+    hash ^= name.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/** "Maksim.Kosach" → "MK"; "info-partner" → "IP"; "dana" → "DA". */
+export function initialsOf(name: string): string {
+  const parts = name.split(/[._\s-]+/).filter((part) => part.length > 0);
+  const letters =
+    parts.length >= 2
+      ? `${parts[0][0]}${parts[1][0]}`
+      : (parts[0] ?? name).slice(0, 2);
+  return letters.toUpperCase();
+}
+
+/** The signed-in glab user, so their own avatar can stand out. */
+export const ViewerContext = React.createContext<string | null>(null);
+
+/** Notion's round avatar; initials because GitLab avatars need auth. */
 export function Avatar({
   username,
   size = 20,
@@ -458,17 +518,21 @@ export function Avatar({
   size?: number;
   className?: string;
 }) {
+  const viewer = React.useContext(ViewerContext);
+  const isMe = viewer !== null && viewer.toLowerCase() === username.toLowerCase();
   return (
     <span
-      title={username}
+      title={isMe ? `${username} (you)` : username}
       aria-hidden="true"
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.45) }}
+      style={{ width: size, height: size, fontSize: Math.max(8, Math.round(size * 0.42)) }}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full bg-foreground/[0.08] font-medium uppercase leading-none text-foreground/70",
+        "inline-flex shrink-0 items-center justify-center rounded-full font-semibold leading-none",
+        AVATAR_CLASSES[hashName(username.toLowerCase()) % AVATAR_CLASSES.length],
+        isMe && "ring-2 ring-blue-600 ring-offset-1 ring-offset-background [.dark_&]:ring-blue-400",
         className,
       )}
     >
-      {username.slice(0, 1)}
+      {initialsOf(username)}
     </span>
   );
 }

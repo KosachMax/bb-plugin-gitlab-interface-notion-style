@@ -3,8 +3,15 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import type { PluginRpcClient, PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import {
+  buildBranchRows,
   classifyJobStatus,
   countDiffLines,
+  isTerminalPipelineStatus,
+  jobActions,
+  mergeRequestIidFromRef,
+  retryableJobs,
+  toPipelineJob,
+  toPipelineSummary,
   fetchProjectItems,
   gitlabRpcContract,
   isProjectRef,
@@ -237,6 +244,7 @@ describe("bb gitlab argument parsing", () => {
         mine: false,
         author: "@me",
         assignee: null,
+        reviewer: null,
         labels: ["bug", "needs review"],
         draft: true,
         limit: 5,
@@ -256,6 +264,13 @@ describe("bb gitlab argument parsing", () => {
     });
     expect(parseGitlabCliArgs(["issues", "--draft"])).toEqual({
       error: 'Unknown flag "--draft".',
+    });
+    // Reviewers exist on merge requests only.
+    expect(parseGitlabCliArgs(["issues", "--reviewer", "ilya"])).toEqual({
+      error: 'Unknown flag "--reviewer".',
+    });
+    expect(parseGitlabCliArgs(["mrs", "--reviewer", "@me"])).toMatchObject({
+      filters: { reviewer: "@me" },
     });
     expect(parseGitlabCliArgs(["mrs", "--state", "weird"])).toHaveProperty(
       "error",
@@ -419,6 +434,7 @@ describe("GitLab payload parsing", () => {
         author: { id: 3, username: "tanuki" },
         labels: ["bug", "ci"],
         assignees: [{ id: 4, username: "mensahs" }, { id: 5, username: "" }],
+        reviewers: [{ id: 6, username: "ilya" }],
         web_url: "https://gitlab.com/group/app/-/merge_requests/7",
         description: "It fails once per week.",
         updated_at: "2026-08-14T12:29:03.902Z",
@@ -437,6 +453,7 @@ describe("GitLab payload parsing", () => {
         author: "tanuki",
         labels: ["bug", "ci"],
         assignees: ["mensahs"],
+        reviewers: ["ilya"],
         url: "https://gitlab.com/group/app/-/merge_requests/7",
         body: "It fails once per week.",
         updatedAt: "2026-08-14T12:29:03.902Z",
@@ -491,6 +508,7 @@ describe("GitLab payload parsing", () => {
         author: "mensahs",
         labels: [],
         assignees: [],
+        reviewers: [],
         url: "https://gitlab.example.dev/group/sub/app/-/merge_requests/12",
         body: "",
         updatedAt: "2026-08-14T12:29:03.902Z",
@@ -547,5 +565,173 @@ describe("rpc contract", () => {
         iid: 4,
       }),
     ).rejects.toMatchObject({ code: "invalid_output" });
+  });
+});
+
+describe("pipeline actions", () => {
+  it("gates each action on the job status", () => {
+    // A manual job never ran: it plays, it does not retry.
+    expect(jobActions("manual")).toEqual({ retry: false, play: true, cancel: false });
+    expect(jobActions("failed")).toEqual({ retry: true, play: false, cancel: false });
+    expect(jobActions("canceled").retry).toBe(true);
+    expect(jobActions("success").retry).toBe(true);
+    // Live jobs can only be cancelled, never retried or played.
+    for (const status of ["running", "pending", "created", "skipped"]) {
+      expect(jobActions(status).retry).toBe(false);
+      expect(jobActions(status).play).toBe(false);
+    }
+    expect(jobActions("running").cancel).toBe(true);
+    expect(jobActions("created").cancel).toBe(false);
+  });
+
+  it("retries only failed and canceled jobs of a pipeline", () => {
+    const jobs = ["success", "failed", "manual", "canceled", "skipped"].map(
+      (status) => ({ status }),
+    );
+    expect(retryableJobs(jobs).map((job) => job.status)).toEqual([
+      "failed",
+      "canceled",
+    ]);
+  });
+
+  it("knows when a pipeline has stopped changing by itself", () => {
+    for (const status of ["success", "failed", "canceled", "manual"]) {
+      expect(isTerminalPipelineStatus(status)).toBe(true);
+    }
+    for (const status of ["running", "pending", "created", "preparing"]) {
+      expect(isTerminalPipelineStatus(status)).toBe(false);
+    }
+  });
+
+  it("maps GitLab rows and finds the merge request in a ref", () => {
+    expect(
+      toPipelineSummary({
+        id: 7,
+        status: "failed",
+        ref: "main",
+        sha: "abc",
+        source: "push",
+        web_url: "https://gitlab.example/p/-/pipelines/7",
+        created_at: "2026-10-16T10:00:00Z",
+        updated_at: "2026-10-16T10:05:00Z",
+      }),
+    ).toEqual({
+      id: 7,
+      status: "failed",
+      ref: "main",
+      sha: "abc",
+      source: "push",
+      url: "https://gitlab.example/p/-/pipelines/7",
+      createdAt: "2026-10-16T10:00:00Z",
+      updatedAt: "2026-10-16T10:05:00Z",
+    });
+    expect(
+      toPipelineJob({
+        id: 9,
+        name: "pytest",
+        stage: "test",
+        status: "failed",
+        allow_failure: false,
+        web_url: "u",
+      }),
+    ).toMatchObject({ id: 9, durationSeconds: null, allowFailure: false });
+    expect(mergeRequestIidFromRef("refs/merge-requests/4586/head")).toBe(4586);
+    expect(mergeRequestIidFromRef("master")).toBeNull();
+  });
+
+  it("validates pipeline rpc inputs at the boundary", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "gitlab-pipelines" });
+    bb.rpc.register(
+      defineRpcContract({
+        getJobLog: gitlabRpcContract.getJobLog,
+        runPipeline: gitlabRpcContract.runPipeline,
+        runJob: gitlabRpcContract.runJob,
+        mergeMergeRequest: gitlabRpcContract.mergeMergeRequest,
+      }),
+      {
+        getJobLog: () => ({ log: "", truncated: false }),
+        runPipeline: () => ({ id: 1, status: "created", url: "" }),
+        runJob: () => ({ jobId: 1, status: "pending", url: "" }),
+        mergeMergeRequest: () => ({ ok: true as const, state: "merged", scheduled: false }),
+      },
+    );
+    const project = "gitlab.com/group/app";
+    await expect(
+      harness.callRpc("getJobLog", { project, jobId: 0, lines: 10 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    // Unbounded log requests are refused.
+    await expect(
+      harness.callRpc("getJobLog", { project, jobId: 3, lines: 5000 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      harness.callRpc("getJobLog", { project, jobId: 3, lines: 40 }),
+    ).resolves.toEqual({ log: "", truncated: false });
+    // A ref and a merge request together would be ambiguous.
+    await expect(
+      harness.callRpc("runPipeline", { project, ref: "main", mergeRequestIid: 4 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      harness.callRpc("runJob", { project, jobId: 3, action: "delete" }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    // A merge must name the commit it was reviewed at.
+    await expect(
+      harness.callRpc("mergeMergeRequest", { project, iid: 4 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      harness.callRpc("mergeMergeRequest", { project, iid: 4, sha: "abc" }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      harness.callRpc("mergeMergeRequest", { project, iid: 4, sha: "a41c9e07d" }),
+    ).resolves.toMatchObject({ state: "merged" });
+    await expect(
+      harness.callRpc("runJob", { project, jobId: 3, action: "play" }),
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+});
+
+describe("branch rows", () => {
+  const branch = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    default: false,
+    protected: false,
+    merged: false,
+    web_url: `https://gitlab.example/p/-/tree/${name}`,
+    commit: {
+      id: "abc123",
+      title: "Do the thing",
+      author_name: "Dana",
+      committed_date: "2026-10-16T10:00:00Z",
+      web_url: "https://gitlab.example/p/-/commit/abc123",
+    },
+    ...extra,
+  });
+
+  it("attaches the open merge request and the latest pipeline by branch name", () => {
+    const rows = buildBranchRows(
+      [branch("main", { default: true }), branch("fix/dupes"), branch("feat/solo"), null],
+      [
+        { source_branch: "fix/dupes", iid: 128, title: "Fix dupes", draft: false, work_in_progress: true },
+        // An older MR from the same branch must not replace the newer one.
+        { source_branch: "fix/dupes", iid: 90, title: "Old", draft: false, work_in_progress: false },
+      ],
+      [
+        { id: 30, ref: "fix/dupes", status: "failed" },
+        { id: 20, ref: "fix/dupes", status: "success" },
+        { id: 10, ref: "main", status: "success" },
+      ],
+    );
+    expect(rows.map((row) => row.name)).toEqual(["main", "fix/dupes", "feat/solo"]);
+    expect(rows[0]).toMatchObject({ isDefault: true, mergeRequest: null, pipeline: { id: 10 } });
+    expect(rows[1]).toMatchObject({
+      mergeRequest: { iid: 128, draft: true },
+      pipeline: { id: 30, status: "failed" },
+    });
+    expect(rows[2]).toMatchObject({ mergeRequest: null, pipeline: null });
+    expect(rows[1].commit).toMatchObject({ sha: "abc123", author: "Dana" });
+  });
+
+  it("keeps a branch whose commit GitLab did not return", () => {
+    const [row] = buildBranchRows([branch("orphan", { commit: null })], [], []);
+    expect(row.commit).toBeNull();
   });
 });

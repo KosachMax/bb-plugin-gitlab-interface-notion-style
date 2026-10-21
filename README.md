@@ -10,20 +10,50 @@ It keeps the original panel, agent dispatch, and mentions, and adds a fuller
 
 ## What this fork adds
 
-- **A Notion-style panel.** Issues and merge requests are two views of one
-  table (hairline cells, hover-only row actions, COUNT footer); each item opens
-  as a page with a property block whose values are the editors. Filter pills
-  and search edit the same query string, so the old `is:open assignee:@me`
-  grammar still works.
+- **A Notion-style panel.** Issues, merge requests, pipelines, and branches are
+  four views of one database: view tabs, filter pills, inline search,
+  hairline-ruled tables with hover-only row actions. Each item opens as a page.
+  Filter pills and search edit the same query string, so the old
+  `is:open assignee:@me` grammar still works (now with `reviewer:`).
+- **Merge-request page built around "can this merge?"** A readiness strip
+  (pipeline, approvals, discussions, merge status), the failing job's log tail
+  on the page, tabs for Changes, Pipeline, and Discussion, and a rail where
+  reviewers (with Approved/Pending), assignees, and labels are editable.
+- **Merge from the panel.** A Merge button on every open merge request, with a
+  confirmation that shows the exact branches and commit, options for squash,
+  deleting the branch, and "merge when the pipeline succeeds". Anything not
+  green (failed pipeline, no review, open threads) is listed and needs an
+  explicit "Merge anyway". The merge is pinned to the commit you were looking
+  at, so a branch that moved in the meantime is refused, and GitLab still
+  enforces its own required pipelines and approvals.
+- **Threads you can answer.** The Discussion tab shows every thread and comment
+  with a Reply box that posts into the same GitLab thread, plus Resolve / Reopen.
+- **Review at a glance.** "Reviewed or not" sits under the title: formal
+  approvals and 👍 / ✅ reactions count together (a 👎 reads as changes
+  requested), with the reactions shown beside it.
+- **The panel remembers.** Switching to a thread and back returns you to the
+  same page, tab, filters, and scroll position.
+- **Pipelines in the panel.** The project's pipelines, a pipeline page with its
+  jobs and logs, Retry failed, Retry/Play/Cancel per job, Run pipeline. Live
+  pipelines refresh on their own.
+- **Branches.** Newest branches first with the default branch on top, the last
+  commit and author, the open merge request, the latest pipeline, and
+  Create MR / Run pipeline actions.
+- **Reviewers and search everywhere.** A Reviewer column and filter on merge
+  requests, and a search box in every filter and picker menu, fed by all
+  project members and labels (paged), not just those on the loaded rows.
+- **Color that means something.** Each person gets a stable avatar color and
+  your own avatar has a ring; labels are quiet tags with a dot in GitLab's own
+  label color; expected states (open, passed) are quiet, so red and amber mark
+  what needs a person.
 - **A fuller CLI**, usable by you and by agents: `show`, `comment`, `pipeline`
   (jobs plus the tail of each failed job's log), `retry`, `run`, and filters on
-  `issues` / `mrs` (`--state`, `--mine`, `--author`, `--assignee`, `--label`,
-  `--draft`, `--limit`, `--json`). See [What it does](#what-it-does).
+  `issues` / `mrs` (`--state`, `--mine`, `--author`, `--assignee`,
+  `--reviewer`, `--label`, `--draft`, `--limit`, `--json`).
 - **Fixes.** Quick assignee or label toggles could send an empty list and
   clear every value on GitLab; they no longer do.
 
-Not here yet: pipeline, job-log, and Retry/Run screens in the panel. Those are
-CLI-only for now.
+Not here yet: ahead/behind counts and a dedicated page per branch.
 
 ## Install
 

@@ -209,3 +209,38 @@ describe("query editing", () => {
     ]);
   });
 });
+
+describe("reviewer qualifier", () => {
+  const MR: QueryableItem = {
+    ...ISSUE,
+    kind: "mr",
+    reviewers: ["Ilya", "Dana"],
+  };
+
+  it("filters merge requests by reviewer, @me, and no:reviewer", () => {
+    expect(matchesItemQuery(MR, parseItemQuery("reviewer:ilya"), null)).toBe(true);
+    expect(matchesItemQuery(MR, parseItemQuery("reviewer:rio"), null)).toBe(false);
+    expect(matchesItemQuery(MR, parseItemQuery("reviewer:@me"), "dana")).toBe(true);
+    // Until the viewer is known, @me matches nothing rather than everything.
+    expect(matchesItemQuery(MR, parseItemQuery("reviewer:@me"), null)).toBe(false);
+    expect(matchesItemQuery(MR, parseItemQuery("no:reviewer"), null)).toBe(false);
+    expect(
+      matchesItemQuery({ ...MR, reviewers: [] }, parseItemQuery("no:reviewer"), null),
+    ).toBe(true);
+  });
+
+  it("treats a missing reviewer list like an empty one", () => {
+    expect(matchesItemQuery(ISSUE, parseItemQuery("no:reviewer"), null)).toBe(true);
+    expect(matchesItemQuery(ISSUE, parseItemQuery("reviewer:ilya"), null)).toBe(false);
+  });
+
+  it("completes the key and the people", () => {
+    const vocab = { users: ["Ilya", "Dana"], labels: [], projects: [] };
+    expect(suggestQueryTokens("rev", vocab, "mr", null).map((s) => s.insert)).toEqual([
+      "reviewer:",
+    ]);
+    expect(
+      suggestQueryTokens("reviewer:il", vocab, "mr", null).map((s) => s.label),
+    ).toEqual(["Ilya"]);
+  });
+});

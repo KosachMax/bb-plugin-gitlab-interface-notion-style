@@ -21,6 +21,8 @@ export interface QueryableItem {
   author: string;
   labels: string[];
   assignees: string[];
+  /** Merge requests only; absent or empty on issues. */
+  reviewers?: string[];
 }
 
 export interface ParsedItemQuery {
@@ -28,10 +30,12 @@ export interface ParsedItemQuery {
   /** True when `is:draft` asked for drafts only. */
   draftOnly: boolean;
   assignees: string[];
+  reviewers: string[];
   authors: string[];
   labels: string[];
   projects: string[];
   noAssignee: boolean;
+  noReviewer: boolean;
   noLabel: boolean;
   text: string[];
 }
@@ -60,10 +64,12 @@ export function parseItemQuery(query: string): ParsedItemQuery {
     states: [],
     draftOnly: false,
     assignees: [],
+    reviewers: [],
     authors: [],
     labels: [],
     projects: [],
     noAssignee: false,
+    noReviewer: false,
     noLabel: false,
     text: [],
   };
@@ -79,6 +85,8 @@ export function parseItemQuery(query: string): ParsedItemQuery {
       else parsed.states.push(STATE_WORDS[word] ?? word);
     } else if (key === "assignee") {
       parsed.assignees.push(value.toLowerCase());
+    } else if (key === "reviewer") {
+      parsed.reviewers.push(value.toLowerCase());
     } else if (key === "author") {
       parsed.authors.push(value.toLowerCase());
     } else if (key === "label") {
@@ -88,6 +96,7 @@ export function parseItemQuery(query: string): ParsedItemQuery {
     } else if (key === "no") {
       const word = value.toLowerCase();
       if (word === "assignee") parsed.noAssignee = true;
+      if (word === "reviewer") parsed.noReviewer = true;
       if (word === "label") parsed.noLabel = true;
     } else {
       parsed.text.push(unquote(token).toLowerCase());
@@ -122,6 +131,16 @@ export function matchesItemQuery(
       return false;
     }
   }
+  if (query.reviewers.length > 0) {
+    const wanted = resolveLogins(query.reviewers, viewer);
+    if (
+      !(item.reviewers ?? []).some((login) =>
+        wanted.includes(login.toLowerCase()),
+      )
+    ) {
+      return false;
+    }
+  }
   if (query.authors.length > 0) {
     const wanted = resolveLogins(query.authors, viewer);
     if (!wanted.includes(item.author.toLowerCase())) return false;
@@ -137,6 +156,7 @@ export function matchesItemQuery(
     return false;
   }
   if (query.noAssignee && item.assignees.length > 0) return false;
+  if (query.noReviewer && (item.reviewers ?? []).length > 0) return false;
   if (query.noLabel && item.labels.length > 0) return false;
   if (query.text.length > 0) {
     const haystack =
@@ -149,10 +169,11 @@ export function matchesItemQuery(
 export const QUALIFIER_KEYS: { key: string; hint: string }[] = [
   { key: "is:", hint: "state — open, closed, merged, draft" },
   { key: "assignee:", hint: "assigned user, or @me" },
+  { key: "reviewer:", hint: "review requested from, or @me" },
   { key: "author:", hint: "opened by" },
   { key: "label:", hint: "has label" },
   { key: "project:", hint: "in project" },
-  { key: "no:", hint: "missing — assignee, label" },
+  { key: "no:", hint: "missing — assignee, reviewer, label" },
 ];
 
 /** The words the panel can complete, harvested from the loaded items. */
@@ -208,7 +229,7 @@ export function suggestQueryTokens(
       draft: word === "draft",
     }));
   }
-  if (key === "assignee" || key === "author") {
+  if (key === "assignee" || key === "author" || key === "reviewer") {
     return ["@me", ...vocab.users].filter(matches).map((login) => ({
       insert: `${key}:${login} `,
       label: login === "@me" && viewer !== null ? `@me (${viewer})` : login,
@@ -228,7 +249,7 @@ export function suggestQueryTokens(
     }));
   }
   if (key === "no") {
-    return ["assignee", "label"].filter(matches).map((field) => ({
+    return ["assignee", "reviewer", "label"].filter(matches).map((field) => ({
       insert: `${key}:${field} `,
       label: `no:${field}`,
     }));

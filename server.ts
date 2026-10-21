@@ -20,7 +20,27 @@ import {
   type PluginCliContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { explainMergeFailure, mergeAllowance, mergeQuery } from "./lib/merge";
+import {
+  classifyJobStatus,
+  isTerminalPipelineStatus,
+  jobActions,
+  mergeRequestIidFromRef,
+  retryableJobs,
+} from "./lib/pipeline";
 
+// The pipeline rules live in lib/pipeline so the panel shares them; tests and
+// other callers keep reaching them through the server module.
+export {
+  classifyJobStatus,
+  isTerminalPipelineStatus,
+  jobActions,
+  mergeRequestIidFromRef,
+  retryableJobs,
+};
+
+/** Pages of 100 read for members and labels: 2,000 people is the ceiling. */
+const MAX_LIST_PAGES = 20;
 const SYNC_INTERVAL_MS = 5 * 60_000;
 const ISSUE_PAGE = 100;
 const CLOSED_ISSUE_PAGE = 50;
@@ -76,6 +96,8 @@ const itemSchema = z
     author: z.string(),
     labels: z.array(z.string()),
     assignees: z.array(z.string()),
+    /** Merge requests only; always empty for issues. */
+    reviewers: z.array(z.string()),
     url: z.string(),
     body: z.string(),
     updatedAt: z.string(),
@@ -100,6 +122,82 @@ const threadLinkSchema = z
     createdAt: z.string(),
   })
   .strict();
+const pipelineIdSchema = z.number().int().positive();
+const jobIdSchema = z.number().int().positive();
+const pipelineSummarySchema = z
+  .object({
+    id: pipelineIdSchema,
+    status: z.string(),
+    ref: z.string(),
+    sha: z.string(),
+    source: z.string(),
+    url: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
+const pipelineJobSchema = z
+  .object({
+    id: jobIdSchema,
+    name: z.string(),
+    stage: z.string(),
+    status: z.string(),
+    allowFailure: z.boolean(),
+    url: z.string(),
+    durationSeconds: z.number().nullable(),
+  })
+  .strict();
+const pipelineDetailSchema = pipelineSummarySchema
+  .extend({
+    user: z.string(),
+    durationSeconds: z.number().nullable(),
+    yamlErrors: z.string().nullable(),
+  })
+  .strict();
+const pipelineActionSchema = z
+  .object({ id: pipelineIdSchema, status: z.string(), url: z.string() })
+  .strict();
+
+const branchSchema = z
+  .object({
+    name: z.string().min(1),
+    isDefault: z.boolean(),
+    protected: z.boolean(),
+    merged: z.boolean(),
+    url: z.string(),
+    commit: z
+      .object({
+        sha: z.string(),
+        title: z.string(),
+        author: z.string(),
+        date: z.string(),
+        url: z.string(),
+      })
+      .strict()
+      .nullable(),
+    /** The open merge request whose source this branch is. */
+    mergeRequest: z
+      .object({ iid: iidSchema, title: z.string(), draft: z.boolean() })
+      .strict()
+      .nullable(),
+    /** The newest pipeline GitLab ran on this branch. */
+    pipeline: z
+      .object({ id: z.number().int().positive(), status: z.string() })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
+const diffFileSchema = z
+  .object({
+    path: z.string(),
+    status: z.string(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    patch: z.string().nullable(),
+  })
+  .strict();
+
 const mergeRequestSchema = z
   .object({
     project: projectRefSchema,
@@ -114,13 +212,15 @@ const mergeRequestSchema = z
     updatedAt: z.string(),
     sourceBranch: z.string(),
     targetBranch: z.string(),
-    /** Summed over the diffs actually fetched — see filesTruncated. */
-    additions: z.number().int().nonnegative(),
-    deletions: z.number().int().nonnegative(),
-    /** GitLab's own total, which can exceed files.length. */
+    /** GitLab's own file count; the files themselves load with getMergeRequestFiles. */
     changedFiles: z.number().int().nonnegative(),
-    /** True when the diff list stopped at the page limit, so files is partial. */
-    filesTruncated: z.boolean(),
+    /** The source branch's head commit: what a merge from this page is pinned to. */
+    headSha: z.string(),
+    /** The merge request's own squash and delete-branch settings, to prefill the merge dialog. */
+    squash: z.boolean(),
+    removeSourceBranch: z.boolean(),
+    /** A merge is already queued behind the running pipeline. */
+    mergeScheduled: z.boolean(),
     labels: z.array(z.string()),
     assignees: z.array(z.string()),
     reviewers: z.array(z.string()),
@@ -131,23 +231,20 @@ const mergeRequestSchema = z
     approvalsLeft: z.number().int().nonnegative(),
     approvedBy: z.array(z.string()),
     pipeline: z
-      .object({ status: z.string(), url: z.string() })
+      .object({ id: z.number().int().nonnegative(), status: z.string(), url: z.string() })
       .strict()
       .nullable(),
-    jobs: z.array(
-      z
-        .object({
-          name: z.string(),
-          status: z.enum(["success", "failure", "pending", "neutral"]),
-          rawStatus: z.string(),
-          url: z.string(),
-        })
-        .strict(),
-    ),
-    notes: z.array(noteSchema),
+    /** Every thread and standalone comment, oldest first; system notes excluded. */
     discussions: z.array(
       z
         .object({
+          /** GitLab's discussion id, which a reply is posted to. */
+          id: z.string().min(1),
+          /** A single standalone comment rather than a thread. */
+          individual: z.boolean(),
+          /** Can be resolved: review threads, not plain comments. */
+          resolvable: z.boolean(),
+          /** "" for a thread that is not attached to a file. */
           path: z.string(),
           line: z.number().int().nonnegative().nullable(),
           resolved: z.boolean(),
@@ -155,15 +252,10 @@ const mergeRequestSchema = z
         })
         .strict(),
     ),
-    files: z.array(
+    /** Emoji reactions on the merge request itself, grouped by emoji. */
+    reactions: z.array(
       z
-        .object({
-          path: z.string(),
-          status: z.string(),
-          additions: z.number().int().nonnegative(),
-          deletions: z.number().int().nonnegative(),
-          patch: z.string().nullable(),
-        })
+        .object({ name: z.string().min(1), users: z.array(z.string()) })
         .strict(),
     ),
   })
@@ -203,7 +295,13 @@ export const gitlabRpcContract = defineRpcContract({
   },
   projectLabels: {
     input: z.object({ project: projectRefSchema }).strict(),
-    output: z.object({ labels: z.array(z.string().min(1)) }).strict(),
+    output: z
+      .object({
+        labels: z.array(z.string().min(1)),
+        /** GitLab's own label colors, "#rrggbb", by label name. */
+        colors: z.record(z.string(), z.string()),
+      })
+      .strict(),
   },
   setIssueState: {
     input: itemInputSchema
@@ -213,14 +311,30 @@ export const gitlabRpcContract = defineRpcContract({
   },
   setAssignees: {
     input: itemInputSchema
-      .extend({ assignees: z.array(z.string().min(1)) })
+      .extend({
+        assignees: z.array(z.string().min(1)),
+        kind: z.enum(["issue", "mr"]).default("issue"),
+      })
       .strict(),
     output: z
       .object({ ok: z.literal(true), assignees: z.array(z.string().min(1)) })
       .strict(),
   },
+  setReviewers: {
+    input: itemInputSchema
+      .extend({ reviewers: z.array(z.string().min(1)) })
+      .strict(),
+    output: z
+      .object({ ok: z.literal(true), reviewers: z.array(z.string().min(1)) })
+      .strict(),
+  },
   setLabels: {
-    input: itemInputSchema.extend({ labels: z.array(z.string()) }).strict(),
+    input: itemInputSchema
+      .extend({
+        labels: z.array(z.string()),
+        kind: z.enum(["issue", "mr"]).default("issue"),
+      })
+      .strict(),
     output: z
       .object({ ok: z.literal(true), labels: z.array(z.string().min(1)) })
       .strict(),
@@ -250,6 +364,133 @@ export const gitlabRpcContract = defineRpcContract({
   getMergeRequest: {
     input: itemInputSchema,
     output: z.object({ mergeRequest: mergeRequestSchema }).strict(),
+  },
+  /** The diffs, loaded on their own because they are the heaviest part. */
+  getMergeRequestFiles: {
+    input: itemInputSchema,
+    output: z
+      .object({
+        files: z.array(diffFileSchema),
+        additions: z.number().int().nonnegative(),
+        deletions: z.number().int().nonnegative(),
+        /** True when the list stopped at the page limit, so files is partial. */
+        truncated: z.boolean(),
+      })
+      .strict(),
+  },
+  listPipelines: {
+    input: z
+      .object({
+        project: projectRefSchema,
+        ref: z.string().min(1).max(255).optional(),
+        status: z.string().min(1).max(40).optional(),
+        limit: z.number().int().min(1).max(100).default(30),
+      })
+      .strict(),
+    output: z
+      .object({
+        pipelines: z.array(pipelineSummarySchema),
+        defaultBranch: z.string(),
+      })
+      .strict(),
+  },
+  getPipeline: {
+    input: z.object({ project: projectRefSchema, id: pipelineIdSchema }).strict(),
+    output: z
+      .object({
+        pipeline: pipelineDetailSchema,
+        jobs: z.array(pipelineJobSchema),
+        /** The merge request this pipeline belongs to, when it is one. */
+        mergeRequestIid: z.number().int().positive().nullable(),
+      })
+      .strict(),
+  },
+  listBranches: {
+    input: z
+      .object({
+        project: projectRefSchema,
+        search: z.string().max(100).optional(),
+        limit: z.number().int().min(1).max(100).default(100),
+      })
+      .strict(),
+    output: z.object({ branches: z.array(branchSchema) }).strict(),
+  },
+  /** A pipeline's jobs on their own, so a merge request page need not wait for them. */
+  getPipelineJobs: {
+    input: z.object({ project: projectRefSchema, id: pipelineIdSchema }).strict(),
+    output: z.object({ jobs: z.array(pipelineJobSchema) }).strict(),
+  },
+  getJobLog: {
+    input: z
+      .object({
+        project: projectRefSchema,
+        jobId: jobIdSchema,
+        lines: z.number().int().min(1).max(2000).default(60),
+      })
+      .strict(),
+    output: z.object({ log: z.string(), truncated: z.boolean() }).strict(),
+  },
+  retryPipeline: {
+    input: z.object({ project: projectRefSchema, id: pipelineIdSchema }).strict(),
+    output: pipelineActionSchema.extend({ retried: z.number().int().nonnegative() }).strict(),
+  },
+  cancelPipeline: {
+    input: z.object({ project: projectRefSchema, id: pipelineIdSchema }).strict(),
+    output: pipelineActionSchema,
+  },
+  runJob: {
+    input: z
+      .object({
+        project: projectRefSchema,
+        jobId: jobIdSchema,
+        action: z.enum(["retry", "play", "cancel"]),
+      })
+      .strict(),
+    output: z.object({ jobId: jobIdSchema, status: z.string(), url: z.string() }).strict(),
+  },
+  runPipeline: {
+    input: z
+      .object({
+        project: projectRefSchema,
+        ref: z.string().min(1).max(255).optional(),
+        mergeRequestIid: z.number().int().positive().optional(),
+      })
+      .strict()
+      .refine((value) => value.ref === undefined || value.mergeRequestIid === undefined, {
+        message: "pass a ref or a merge request, not both",
+      }),
+    output: pipelineActionSchema,
+  },
+  mergeMergeRequest: {
+    input: itemInputSchema
+      .extend({
+        /** The commit the person reviewed; GitLab refuses if the branch has moved. */
+        sha: z.string().min(7).max(64),
+        squash: z.boolean().default(false),
+        removeSourceBranch: z.boolean().default(false),
+        whenPipelineSucceeds: z.boolean().default(false),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.literal(true),
+        state: z.string(),
+        /** Queued behind the pipeline instead of merged right now. */
+        scheduled: z.boolean(),
+      })
+      .strict(),
+  },
+  replyToDiscussion: {
+    input: itemInputSchema
+      .extend({ discussionId: z.string().min(1), body: nonBlankStringSchema })
+      .strict(),
+    output: okResultSchema,
+  },
+  setDiscussionResolved: {
+    input: itemInputSchema
+      .extend({ discussionId: z.string().min(1), resolved: z.boolean() })
+      .strict(),
+    output: okResultSchema,
   },
   commentIssue: {
     input: itemInputSchema.extend({ body: nonBlankStringSchema }).strict(),
@@ -306,6 +547,7 @@ const gitlabItemRowSchema = z.looseObject({
   author: gitlabUserRowSchema.nullish().catch(null),
   labels: z.array(z.string()).catch([]),
   assignees: z.array(gitlabUserRowSchema).catch([]),
+  reviewers: z.array(gitlabUserRowSchema).catch([]),
   web_url: z.string().catch(""),
   description: z.string().catch(""),
   updated_at: z.string().catch(""),
@@ -315,6 +557,10 @@ const gitlabItemListSchema = z
   .catch([]);
 const gitlabMergeRequestRowSchema = gitlabItemRowSchema.extend({
   created_at: z.string().catch(""),
+  sha: z.string().catch(""),
+  squash: z.boolean().catch(false),
+  force_remove_source_branch: z.boolean().nullish().catch(null),
+  merge_when_pipeline_succeeds: z.boolean().catch(false),
   source_branch: z.string().catch(""),
   target_branch: z.string().catch(""),
   changes_count: z.union([z.string(), z.number()]).catch(""),
@@ -350,7 +596,21 @@ const gitlabNoteRowSchema = z.looseObject({
 });
 const gitlabNoteListSchema = z.array(gitlabNoteRowSchema).catch([]);
 const gitlabDiscussionListSchema = z
-  .array(z.looseObject({ notes: gitlabNoteListSchema }))
+  .array(
+    z.looseObject({
+      id: z.string().catch(""),
+      individual_note: z.boolean().catch(false),
+      notes: gitlabNoteListSchema,
+    }),
+  )
+  .catch([]);
+const gitlabAwardListSchema = z
+  .array(
+    z.looseObject({
+      name: z.string().catch(""),
+      user: gitlabUserRowSchema.nullish().catch(null),
+    }),
+  )
   .catch([]);
 const gitlabDiffListSchema = z
   .array(
@@ -367,6 +627,7 @@ const gitlabDiffListSchema = z
 const gitlabJobListSchema = z
   .array(
     z.looseObject({
+      id: z.number().int().nonnegative().catch(0),
       name: z.string().catch("job"),
       status: z.string().catch(""),
       web_url: z.string().catch(""),
@@ -378,7 +639,15 @@ const gitlabPipelineRowSchema = z.looseObject({
   status: z.string().catch(""),
   ref: z.string().catch(""),
   sha: z.string().catch(""),
+  source: z.string().catch(""),
   web_url: z.string().catch(""),
+  created_at: z.string().catch(""),
+  updated_at: z.string().catch(""),
+});
+const gitlabPipelineDetailSchema = gitlabPipelineRowSchema.extend({
+  duration: z.number().nullish().catch(null),
+  yaml_errors: z.string().nullish().catch(null),
+  user: gitlabUserRowSchema.nullish().catch(null),
 });
 const gitlabPipelineJobRowSchema = z.looseObject({
   id: z.number().int().positive(),
@@ -387,6 +656,7 @@ const gitlabPipelineJobRowSchema = z.looseObject({
   status: z.string().catch(""),
   allow_failure: z.boolean().catch(false),
   web_url: z.string().catch(""),
+  duration: z.number().nullish().catch(null),
   pipeline: z
     .looseObject({ id: z.number().int().positive() })
     .nullish()
@@ -395,6 +665,126 @@ const gitlabPipelineJobRowSchema = z.looseObject({
 const gitlabPipelineJobListSchema = z
   .array(gitlabPipelineJobRowSchema.nullable().catch(null))
   .catch([]);
+type PipelineRowShape = z.infer<typeof gitlabPipelineRowSchema>;
+type PipelineJobRowShape = z.infer<typeof gitlabPipelineJobRowSchema>;
+
+export function toPipelineSummary(row: PipelineRowShape) {
+  return {
+    id: row.id,
+    status: row.status,
+    ref: row.ref,
+    sha: row.sha,
+    source: row.source,
+    url: row.web_url,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function toPipelineJob(row: PipelineJobRowShape) {
+  return {
+    id: row.id,
+    name: row.name,
+    stage: row.stage,
+    status: row.status,
+    allowFailure: row.allow_failure,
+    url: row.web_url,
+    durationSeconds: row.duration ?? null,
+  };
+}
+
+const gitlabBranchListSchema = z
+  .array(
+    z
+      .looseObject({
+        name: z.string().catch(""),
+        default: z.boolean().catch(false),
+        protected: z.boolean().catch(false),
+        merged: z.boolean().catch(false),
+        web_url: z.string().catch(""),
+        commit: z
+          .looseObject({
+            id: z.string().catch(""),
+            title: z.string().catch(""),
+            author_name: z.string().catch(""),
+            committed_date: z.string().catch(""),
+            web_url: z.string().catch(""),
+          })
+          .nullish()
+          .catch(null),
+      })
+      .nullable()
+      .catch(null),
+  )
+  .catch([]);
+
+type BranchRowShape = NonNullable<
+  z.infer<typeof gitlabBranchListSchema>[number]
+>;
+
+/**
+ * Joins GitLab's branch list with the open merge requests and recent
+ * pipelines that mention each branch. Pure, so the join is testable; the
+ * three lists come from three requests.
+ */
+export function buildBranchRows(
+  branches: ReadonlyArray<BranchRowShape | null>,
+  openMergeRequests: ReadonlyArray<{
+    source_branch: string;
+    iid: number;
+    title: string;
+    draft: boolean;
+    work_in_progress: boolean;
+  }>,
+  pipelines: ReadonlyArray<{ id: number; ref: string; status: string }>,
+) {
+  const mrBySource = new Map<string, (typeof openMergeRequests)[number]>();
+  for (const mr of openMergeRequests) {
+    // The newest MR wins when a branch has several.
+    if (!mrBySource.has(mr.source_branch)) mrBySource.set(mr.source_branch, mr);
+  }
+  // Pipelines arrive newest first, so the first one seen per ref is its latest.
+  const pipelineByRef = new Map<string, (typeof pipelines)[number]>();
+  for (const pipeline of pipelines) {
+    if (!pipelineByRef.has(pipeline.ref)) pipelineByRef.set(pipeline.ref, pipeline);
+  }
+  return branches
+    .filter((row): row is BranchRowShape => row !== null && row.name.length > 0)
+    .map((row) => {
+      const mr = mrBySource.get(row.name);
+      const pipeline = pipelineByRef.get(row.name);
+      return {
+        name: row.name,
+        isDefault: row.default,
+        protected: row.protected,
+        merged: row.merged,
+        url: row.web_url,
+        commit:
+          row.commit == null
+            ? null
+            : {
+                sha: row.commit.id,
+                title: row.commit.title,
+                author: row.commit.author_name,
+                date: row.commit.committed_date,
+                url: row.commit.web_url,
+              },
+        mergeRequest:
+          mr === undefined
+            ? null
+            : {
+                iid: mr.iid,
+                title: mr.title,
+                draft: mr.draft || mr.work_in_progress,
+              },
+        pipeline:
+          pipeline === undefined
+            ? null
+            : { id: pipeline.id, status: pipeline.status },
+      };
+    });
+}
+
 const gitlabApprovalsSchema = z
   .looseObject({
     approvals_required: z.number().int().nonnegative().catch(0),
@@ -406,7 +796,12 @@ const gitlabApprovalsSchema = z
   .catch({ approvals_required: 0, approvals_left: 0, approved_by: [] });
 const gitlabMemberListSchema = z.array(gitlabUserRowSchema).catch([]);
 const gitlabLabelListSchema = z
-  .array(z.looseObject({ name: z.string().catch("") }))
+  .array(
+    z.looseObject({
+      name: z.string().catch(""),
+      color: z.string().catch(""),
+    }),
+  )
   .catch([]);
 
 type GitlabUserRow = z.infer<typeof gitlabUserRowSchema>;
@@ -431,6 +826,7 @@ interface CachedItem {
   author: string;
   labels: string[];
   assignees: string[];
+  reviewers: string[];
   url: string;
   body: string;
   updatedAt: string;
@@ -617,28 +1013,6 @@ export function countDiffLines(diff: string): {
   return { additions, deletions };
 }
 
-/** GitLab job status → one traffic-light value for the panel. */
-export function classifyJobStatus(
-  rawStatus: string,
-): "success" | "failure" | "pending" | "neutral" {
-  switch (rawStatus) {
-    case "success":
-      return "success";
-    case "failed":
-      return "failure";
-    case "running":
-    case "pending":
-    case "created":
-    case "preparing":
-    case "scheduled":
-    case "waiting_for_resource":
-      return "pending";
-    default:
-      // canceled, skipped, manual, and anything GitLab adds later.
-      return "neutral";
-  }
-}
-
 // ---------------------------------------------------------------------------
 // `bb gitlab` argument parsing. Pure, so the shape of every subcommand is
 // testable without glab; resolving a target against the authenticated hosts
@@ -654,6 +1028,8 @@ export interface GitlabListFilters {
   author: string | null;
   /** Username, or "@me". */
   assignee: string | null;
+  /** Merge requests only. Username, or "@me". */
+  reviewer: string | null;
   /** Every label must be present. */
   labels: string[];
   draft: boolean;
@@ -790,7 +1166,7 @@ export function parseGitlabCliArgs(
     },
     mrs: {
       booleans: ["mine", "draft", "json"],
-      values: ["state", "author", "assignee", "label", "limit"],
+      values: ["state", "author", "assignee", "reviewer", "label", "limit"],
       repeatable: ["label"],
     },
     show: { booleans: ["json"], values: [] },
@@ -854,6 +1230,7 @@ export function parseGitlabCliArgs(
           mine: booleans.has("mine"),
           author: value("author"),
           assignee: value("assignee"),
+          reviewer: value("reviewer"),
           labels: values.get("label") ?? [],
           draft: booleans.has("draft"),
           limit,
@@ -1018,6 +1395,7 @@ function toItem(
     author: row.author?.username ?? "",
     labels: row.labels,
     assignees: usernames(row.assignees),
+    reviewers: kind === "mr" ? usernames(row.reviewers) : [],
     url: row.web_url,
     body: row.description,
     updatedAt: row.updated_at,
@@ -1085,6 +1463,19 @@ export async function fetchProjectItems(
   ];
 }
 
+/**
+ * glab runs a git lookup and posts usage telemetry each time it exits, which
+ * made every `glab api` call take 2.3s instead of 0.65s (measured against a
+ * self-managed instance). A panel makes a handful of calls per page, so this
+ * is the difference between a page loading in 5s and in 1.5s. The switches are
+ * set on the processes this plugin starts only; the user's own glab settings
+ * and shell are untouched.
+ */
+export const GLAB_QUIET_ENV = {
+  GLAB_SEND_TELEMETRY: "false",
+  GLAB_CHECK_UPDATE: "false",
+} as const;
+
 function run(
   file: string,
   args: string[],
@@ -1097,7 +1488,11 @@ function run(
   execFile(
     file,
     args,
-    { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+    {
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, ...GLAB_QUIET_ENV },
+    },
     (error, stdout, stderr) => {
       if (error) {
         reject(
@@ -1178,15 +1573,39 @@ export default async function plugin(bb: BbPluginApi) {
    * and quotes intact; array parameters such as `assignee_ids[]` belong in the
    * endpoint's query string, which GitLab also reads for PUT.
    */
+  // Identical reads that arrive together (a page opening, React running an
+  // effect twice, two panels asking for the same list) share one glab call,
+  // and a read repeated within a few seconds reuses the answer. Any write
+  // clears it, so a page that reloads after an action sees the new state.
+  const READ_REUSE_MS = 4_000;
+  const recentReads = new Map<string, { at: number; result: Promise<unknown> }>();
+
   const gitlabApi: GitlabApi = async (project, endpoint, options) => {
     const { host } = parseProjectRef(project);
+    const isRead = options?.method === undefined;
+    const cacheKey = `${host}|${endpoint}`;
+    if (isRead) {
+      const recent = recentReads.get(cacheKey);
+      if (recent !== undefined && Date.now() - recent.at < READ_REUSE_MS) {
+        return recent.result;
+      }
+    } else {
+      recentReads.clear();
+    }
     const args = ["api", "--hostname", host];
     if (options?.method !== undefined) args.push("--method", options.method);
     for (const [key, value] of Object.entries(options?.fields ?? {})) {
       args.push("--raw-field", `${key}=${value}`);
     }
     args.push(endpoint);
-    return JSON.parse(await glab(args, 30_000)) as unknown;
+    const result = glab(args, 30_000).then((text) => JSON.parse(text) as unknown);
+    if (isRead) {
+      recentReads.set(cacheKey, { at: Date.now(), result });
+      // A failed read must not be served again.
+      result.catch(() => recentReads.delete(cacheKey));
+      if (recentReads.size > 200) recentReads.clear();
+    }
+    return result;
   };
 
   /**
@@ -1223,7 +1642,11 @@ export default async function plugin(bb: BbPluginApi) {
     execFile(
       file,
       ["auth", "status"],
-      { timeout: 15_000, maxBuffer: 1024 * 1024 },
+      {
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, ...GLAB_QUIET_ENV },
+      },
       (_error, stdout, stderr) => resolve(`${stdout}\n${stderr}`),
     );
     const hosts = parseAuthenticatedHosts(await promise);
@@ -1315,6 +1738,8 @@ export default async function plugin(bb: BbPluginApi) {
        updated_at TEXT NOT NULL,
        PRIMARY KEY (project, kind, iid)
      )`,
+    // Merge-request reviewers; rows cached before this fill in on the next sync.
+    `ALTER TABLE items ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'`,
   ]);
 
   const cachedStringArraySchema = z.array(z.string()).catch([]);
@@ -1332,6 +1757,9 @@ export default async function plugin(bb: BbPluginApi) {
       labels: cachedStringArraySchema.parse(JSON.parse(String(row.labels))),
       assignees: cachedStringArraySchema.parse(
         JSON.parse(String(row.assignees)),
+      ),
+      reviewers: cachedStringArraySchema.parse(
+        JSON.parse(String(row.reviewers ?? "[]")),
       ),
       url: String(row.url),
       body: String(row.body),
@@ -1389,8 +1817,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   function replaceProjectRows(project: string, items: CachedItem[]): void {
     const insert = db.prepare(
-      `INSERT INTO items (project, iid, kind, title, state, draft, author, labels, assignees, url, body, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO items (project, iid, kind, title, state, draft, author, labels, assignees, reviewers, url, body, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
       db.prepare("DELETE FROM items WHERE project = ?").run(project);
@@ -1405,6 +1833,7 @@ export default async function plugin(bb: BbPluginApi) {
           item.author,
           JSON.stringify(item.labels),
           JSON.stringify(item.assignees),
+          JSON.stringify(item.reviewers),
           item.url,
           item.body,
           item.updatedAt,
@@ -1419,7 +1848,12 @@ export default async function plugin(bb: BbPluginApi) {
     kind: "issue" | "mr",
     project: string,
     iid: number,
-    patch: { state?: string; assignees?: string[]; labels?: string[] },
+    patch: {
+      state?: string;
+      assignees?: string[];
+      reviewers?: string[];
+      labels?: string[];
+    },
   ): void {
     if (patch.state !== undefined) {
       db.prepare(
@@ -1430,6 +1864,11 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare(
         "UPDATE items SET assignees = ? WHERE project = ? AND kind = ? AND iid = ?",
       ).run(JSON.stringify(patch.assignees), project, kind, iid);
+    }
+    if (patch.reviewers !== undefined) {
+      db.prepare(
+        "UPDATE items SET reviewers = ? WHERE project = ? AND kind = ? AND iid = ?",
+      ).run(JSON.stringify(patch.reviewers), project, kind, iid);
     }
     if (patch.labels !== undefined) {
       db.prepare(
@@ -1622,7 +2061,10 @@ export default async function plugin(bb: BbPluginApi) {
     string,
     { members: GitlabUserRow[]; fetchedAt: number }
   >();
-  const labelsCache = new Map<string, { labels: string[]; fetchedAt: number }>();
+  const labelsCache = new Map<
+    string,
+    { labels: string[]; colors: Record<string, string>; fetchedAt: number }
+  >();
 
   async function getViewer(host?: string): Promise<string> {
     const resolvedHost = host ?? authenticatedHosts[0]?.host;
@@ -1648,12 +2090,19 @@ export default async function plugin(bb: BbPluginApi) {
       return cached.members;
     }
     const { path } = parseProjectRef(project);
-    const members = gitlabMemberListSchema.parse(
-      await gitlabApi(
-        project,
-        `projects/${encodeURIComponent(path)}/members/all?per_page=100`,
-      ),
-    );
+    // A large instance has far more than one page of people; read them all
+    // (bounded) so the pickers and filters can reach everyone.
+    const members: GitlabUserRow[] = [];
+    for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+      const rows = gitlabMemberListSchema.parse(
+        await gitlabApi(
+          project,
+          `projects/${encodeURIComponent(path)}/members/all?per_page=100&page=${page}`,
+        ),
+      );
+      members.push(...rows);
+      if (rows.length < 100) break;
+    }
     membersCache.set(project, { members, fetchedAt: Date.now() });
     return members;
   }
@@ -1689,24 +2138,39 @@ export default async function plugin(bb: BbPluginApi) {
     return ids;
   }
 
-  async function getProjectLabels(project: string): Promise<string[]> {
+  async function getProjectLabels(
+    project: string,
+  ): Promise<{ labels: string[]; colors: Record<string, string> }> {
     const cached = labelsCache.get(project);
     if (cached !== undefined && Date.now() - cached.fetchedAt < 10 * 60_000) {
-      return cached.labels;
+      return cached;
     }
     const { path } = parseProjectRef(project);
-    const rows = gitlabLabelListSchema.parse(
-      await gitlabApi(
-        project,
-        `projects/${encodeURIComponent(path)}/labels?per_page=100&with_counts=false`,
-      ),
-    );
+    const rows: z.infer<typeof gitlabLabelListSchema> = [];
+    for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+      const batch = gitlabLabelListSchema.parse(
+        await gitlabApi(
+          project,
+          `projects/${encodeURIComponent(path)}/labels?per_page=100&with_counts=false&page=${page}`,
+        ),
+      );
+      rows.push(...batch);
+      if (batch.length < 100) break;
+    }
     // Group labels come back alongside project labels and can repeat.
     const labels = [
       ...new Set(rows.map((row) => row.name.trim()).filter(Boolean)),
     ].sort((a, b) => a.localeCompare(b));
-    labelsCache.set(project, { labels, fetchedAt: Date.now() });
-    return labels;
+    const colors: Record<string, string> = {};
+    for (const row of rows) {
+      const name = row.name.trim();
+      if (name.length > 0 && /^#[0-9a-fA-F]{3,8}$/.test(row.color)) {
+        colors[name] = row.color;
+      }
+    }
+    const result = { labels, colors };
+    labelsCache.set(project, { ...result, fetchedAt: Date.now() });
+    return result;
   }
 
   /** Human notes of a GitLab note list — GitLab's activity feed is in there too. */
@@ -1774,7 +2238,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     /** { project } → labels available in that project. */
     async projectLabels(input) {
-      return { labels: await getProjectLabels(input.project) };
+      return await getProjectLabels(input.project);
     },
 
     /** { project, iid, state } → close or reopen an issue. */
@@ -1792,11 +2256,12 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true };
     },
 
-    /** { project, iid, assignees } → set the exact assignee list. */
+    /** { project, iid, assignees, kind? } → set the exact assignee list. */
     async setAssignees({
       project,
       iid,
       assignees,
+      kind,
     }): Promise<{ ok: true; assignees: string[] }> {
       const next = [...new Set(assignees)];
       const { path } = parseProjectRef(project);
@@ -1808,13 +2273,40 @@ export default async function plugin(bb: BbPluginApi) {
       const updated = gitlabItemRowSchema.parse(
         await gitlabApi(
           project,
-          `projects/${encodeURIComponent(path)}/issues/${iid}?${query}`,
+          `projects/${encodeURIComponent(path)}/${
+            kind === "mr" ? "merge_requests" : "issues"
+          }/${iid}?${query}`,
           { method: "PUT" },
         ),
       );
       const applied = usernames(updated.assignees);
-      patchCachedItem("issue", project, iid, { assignees: applied });
+      patchCachedItem(kind, project, iid, { assignees: applied });
       return { ok: true, assignees: applied };
+    },
+
+    /** { project, iid, reviewers } → set the exact merge-request reviewer list. */
+    async setReviewers({
+      project,
+      iid,
+      reviewers,
+    }): Promise<{ ok: true; reviewers: string[] }> {
+      const next = [...new Set(reviewers)];
+      const { path } = parseProjectRef(project);
+      const ids = await resolveUserIds(project, next);
+      // As with assignees, [0] is how GitLab clears the list.
+      const query = (ids.length > 0 ? ids : [0])
+        .map((id) => `reviewer_ids[]=${id}`)
+        .join("&");
+      const updated = gitlabItemRowSchema.parse(
+        await gitlabApi(
+          project,
+          `projects/${encodeURIComponent(path)}/merge_requests/${iid}?${query}`,
+          { method: "PUT" },
+        ),
+      );
+      const applied = usernames(updated.reviewers);
+      patchCachedItem("mr", project, iid, { reviewers: applied });
+      return { ok: true, reviewers: applied };
     },
 
     /** { project, iid, labels } → set the exact issue label list. */
@@ -1822,6 +2314,7 @@ export default async function plugin(bb: BbPluginApi) {
       project,
       iid,
       labels,
+      kind,
     }): Promise<{ ok: true; labels: string[] }> {
       const next = [
         ...new Set(labels.map((label) => label.trim()).filter(Boolean)),
@@ -1830,11 +2323,13 @@ export default async function plugin(bb: BbPluginApi) {
       const updated = gitlabItemRowSchema.parse(
         await gitlabApi(
           project,
-          `projects/${encodeURIComponent(path)}/issues/${iid}`,
+          `projects/${encodeURIComponent(path)}/${
+            kind === "mr" ? "merge_requests" : "issues"
+          }/${iid}`,
           { method: "PUT", fields: { labels: next.join(",") } },
         ),
       );
-      patchCachedItem("issue", project, iid, { labels: updated.labels });
+      patchCachedItem(kind, project, iid, { labels: updated.labels });
       return { ok: true, labels: updated.labels };
     },
 
@@ -1890,38 +2385,24 @@ export default async function plugin(bb: BbPluginApi) {
           return undefined;
         }
       };
-      const [detailRaw, notesRaw, discussionsRaw, diffsRaw, approvalsRaw] =
+      // Everything the top of the page needs, in one round of parallel calls.
+      // The diffs are the heaviest payload and are only needed on the Changes
+      // tab, so they load separately (getMergeRequestFiles).
+      const [detailRaw, discussionsRaw, approvalsRaw, awardsRaw] =
         await Promise.all([
           gitlabApi(project, base),
-          gitlabApi(
-            project,
-            `${base}/notes?per_page=100&sort=asc&order_by=created_at`,
-          ),
           optional(`${base}/discussions?per_page=100`),
-          optional(`${base}/diffs?per_page=${DIFF_PAGE}`),
           optional(`${base}/approvals`),
+          optional(`${base}/award_emoji?per_page=100`),
         ]);
       const detail = gitlabMergeRequestRowSchema.parse(detailRaw);
 
-      const pipelineId = detail.head_pipeline?.id ?? null;
-      const jobs = gitlabJobListSchema
-        .parse(
-          pipelineId === null
-            ? []
-            : await optional(
-                `projects/${encoded}/pipelines/${pipelineId}/jobs?per_page=100`,
-              ),
-        )
-        .map((job) => ({
-          name: job.name,
-          status: classifyJobStatus(job.status),
-          rawStatus: job.status,
-          url: job.web_url,
-        }));
-
-      // A discussion whose notes carry a diff position is an inline review
-      // thread; everything else already showed up in the conversation notes.
+      // Threads and standalone comments alike, so each can be replied to.
+      // Notes GitLab writes itself ("approved this merge request") are dropped.
       const discussions: Array<{
+        id: string;
+        individual: boolean;
+        resolvable: boolean;
         path: string;
         line: number | null;
         resolved: boolean;
@@ -1930,10 +2411,10 @@ export default async function plugin(bb: BbPluginApi) {
       for (const discussion of gitlabDiscussionListSchema.parse(
         discussionsRaw,
       )) {
+        if (discussion.id.length === 0) continue;
         const position = discussion.notes.find(
           (note) => note.position != null,
         )?.position;
-        if (position == null) continue;
         const notes = discussion.notes
           .filter((note) => !note.system && note.body.trim().length > 0)
           .map((note) => ({
@@ -1942,19 +2423,94 @@ export default async function plugin(bb: BbPluginApi) {
             createdAt: note.created_at,
           }));
         if (notes.length === 0) continue;
+        const resolvable = discussion.notes.some((note) => note.resolvable);
         discussions.push({
-          path: position.new_path ?? position.old_path ?? "",
-          line: position.new_line ?? position.old_line,
-          resolved: discussion.notes.every(
-            (note) => !note.resolvable || note.resolved,
-          ),
+          id: discussion.id,
+          individual: discussion.individual_note,
+          resolvable,
+          path: position?.new_path ?? position?.old_path ?? "",
+          line: position == null ? null : (position.new_line ?? position.old_line),
+          resolved:
+            resolvable &&
+            discussion.notes.every((note) => !note.resolvable || note.resolved),
           notes,
         });
       }
 
+      const reactionsByName = new Map<string, string[]>();
+      for (const award of gitlabAwardListSchema.parse(awardsRaw)) {
+        const username = award.user?.username ?? "";
+        if (award.name.length === 0 || username.length === 0) continue;
+        const users = reactionsByName.get(award.name) ?? [];
+        if (!users.includes(username)) users.push(username);
+        reactionsByName.set(award.name, users);
+      }
+      const reactions = [...reactionsByName].map(([name, users]) => ({
+        name,
+        users,
+      }));
+
+      const approvals = gitlabApprovalsSchema.parse(approvalsRaw);
+      const changesCount = Number.parseInt(String(detail.changes_count), 10);
+      const changedFiles = Number.isFinite(changesCount) ? changesCount : 0;
+
+      return {
+        mergeRequest: {
+          project,
+          iid,
+          title: detail.title,
+          state: detail.state,
+          draft: detail.draft || detail.work_in_progress,
+          author: detail.author?.username ?? "",
+          body: detail.description,
+          url: detail.web_url,
+          createdAt: detail.created_at,
+          updatedAt: detail.updated_at,
+          sourceBranch: detail.source_branch,
+          targetBranch: detail.target_branch,
+          changedFiles,
+          headSha: detail.sha,
+          squash: detail.squash,
+          removeSourceBranch: detail.force_remove_source_branch ?? false,
+          mergeScheduled: detail.merge_when_pipeline_succeeds,
+          labels: detail.labels,
+          assignees: usernames(detail.assignees),
+          reviewers: usernames(detail.reviewers),
+          mergeStatus: detail.detailed_merge_status || detail.merge_status,
+          hasConflicts: detail.has_conflicts,
+          approvalsRequired: approvals.approvals_required,
+          approvalsLeft: approvals.approvals_left,
+          approvedBy: approvals.approved_by
+            .map((entry) => entry.user?.username ?? "")
+            .filter((name) => name.length > 0),
+          pipeline:
+            detail.head_pipeline == null
+              ? null
+              : {
+                  id: detail.head_pipeline.id ?? 0,
+                  status: detail.head_pipeline.status,
+                  url: detail.head_pipeline.web_url,
+                },
+          discussions,
+          reactions,
+        },
+      };
+    },
+
+    /** { project, id } → the jobs of one pipeline. */
+    async getPipelineJobs({ project, id }) {
+      return { jobs: (await listPipelineJobs(project, id)).map(toPipelineJob) };
+    },
+
+    /** { project, iid } → the changed files with their patches. */
+    async getMergeRequestFiles({ project, iid }) {
+      const raw = await gitlabApi(
+        project,
+        `${projectApiBase(project)}/merge_requests/${iid}/diffs?per_page=${DIFF_PAGE}`,
+      );
       let additions = 0;
       let deletions = 0;
-      const files = gitlabDiffListSchema.parse(diffsRaw).map((file) => {
+      const files = gitlabDiffListSchema.parse(raw).map((file) => {
         const counts = countDiffLines(file.diff);
         additions += counts.additions;
         deletions += counts.deletions;
@@ -1976,57 +2532,252 @@ export default async function plugin(bb: BbPluginApi) {
               : null,
         };
       });
+      // The page cutoff is the only thing that truncates the list; a file
+      // count from GitLab can disagree for its own reasons and must not
+      // fake truncation.
+      return { files, additions, deletions, truncated: files.length >= DIFF_PAGE };
+    },
 
-      const approvals = gitlabApprovalsSchema.parse(approvalsRaw);
-      const changesCount = Number.parseInt(String(detail.changes_count), 10);
-      const changedFiles = Number.isFinite(changesCount)
-        ? changesCount
-        : files.length;
+    /** { project, ref?, status?, limit } → newest pipelines, with the default branch. */
+    async listPipelines({ project, ref, status, limit }) {
+      const query = new URLSearchParams({
+        order_by: "id",
+        sort: "desc",
+        per_page: String(limit),
+      });
+      if (ref !== undefined) query.set("ref", ref);
+      if (status !== undefined) query.set("status", status);
+      const [raw, defaultBranch] = await Promise.all([
+        gitlabApi(project, `${projectApiBase(project)}/pipelines?${query}`),
+        getDefaultBranch(project).catch(() => ""),
+      ]);
+      const pipelines = z
+        .array(gitlabPipelineRowSchema.nullable().catch(null))
+        .catch([])
+        .parse(raw)
+        .filter((row): row is PipelineRow => row !== null)
+        .map(toPipelineSummary);
+      return { pipelines, defaultBranch };
+    },
 
+    /** { project, id } → one pipeline with its jobs. */
+    async getPipeline({ project, id }) {
+      const [detailRaw, jobs] = await Promise.all([
+        gitlabApi(project, `${projectApiBase(project)}/pipelines/${id}`),
+        listPipelineJobs(project, id),
+      ]);
+      const detail = gitlabPipelineDetailSchema.parse(detailRaw);
       return {
-        mergeRequest: {
-          project,
-          iid,
-          title: detail.title,
-          state: detail.state,
-          draft: detail.draft || detail.work_in_progress,
-          author: detail.author?.username ?? "",
-          body: detail.description,
-          url: detail.web_url,
-          createdAt: detail.created_at,
-          updatedAt: detail.updated_at,
-          sourceBranch: detail.source_branch,
-          targetBranch: detail.target_branch,
-          additions,
-          deletions,
-          changedFiles,
-          // The page cutoff is the only thing that truncates the diff list;
-          // changes_count can disagree for its own reasons ("1000+", files
-          // GitLab returns without diff text) and must not fake truncation.
-          filesTruncated: files.length >= DIFF_PAGE,
-          labels: detail.labels,
-          assignees: usernames(detail.assignees),
-          reviewers: usernames(detail.reviewers),
-          mergeStatus: detail.detailed_merge_status || detail.merge_status,
-          hasConflicts: detail.has_conflicts,
-          approvalsRequired: approvals.approvals_required,
-          approvalsLeft: approvals.approvals_left,
-          approvedBy: approvals.approved_by
-            .map((entry) => entry.user?.username ?? "")
-            .filter((name) => name.length > 0),
-          pipeline:
-            detail.head_pipeline == null
-              ? null
-              : {
-                  status: detail.head_pipeline.status,
-                  url: detail.head_pipeline.web_url,
-                },
-          jobs,
-          notes: toNotes(notesRaw),
-          discussions,
-          files,
+        pipeline: {
+          ...toPipelineSummary(detail),
+          user: detail.user?.username ?? "",
+          durationSeconds: detail.duration ?? null,
+          yamlErrors: detail.yaml_errors ?? null,
         },
+        jobs: jobs.map(toPipelineJob),
+        mergeRequestIid: mergeRequestIidFromRef(detail.ref),
       };
+    },
+
+    /** { project, search?, limit } → branches with their open MR and latest pipeline. */
+    async listBranches({ project, search, limit }) {
+      const base = projectApiBase(project);
+      // Newest activity first, so the first 100 are the ones people want.
+      const query = new URLSearchParams({
+        per_page: String(limit),
+        sort: "updated_desc",
+      });
+      const searching = search !== undefined && search.trim().length > 0;
+      if (searching) query.set("search", search.trim());
+      const [branchesRaw, defaultRaw, pipelinesRaw, mergeRequests] = await Promise.all([
+        gitlabApi(project, `${base}/repository/branches?${query}`),
+        // The default branch is often not among the newest 100, but it is
+        // the one people compare everything to, so it always leads the list.
+        searching
+          ? Promise.resolve(null)
+          : getDefaultBranch(project)
+              .then((name) =>
+                gitlabApi(
+                  project,
+                  `${base}/repository/branches/${encodeURIComponent(name)}`,
+                ),
+              )
+              .catch(() => null),
+        gitlabApi(
+          project,
+          `${base}/pipelines?per_page=100&order_by=id&sort=desc`,
+        ).catch(() => []),
+        (async () => {
+          const rows: z.infer<typeof gitlabMergeRequestRowSchema>[] = [];
+          for (let page = 1; page <= 5; page += 1) {
+            const batch = z
+              .array(gitlabMergeRequestRowSchema.nullable().catch(null))
+              .catch([])
+              .parse(
+                await gitlabApi(
+                  project,
+                  `${base}/merge_requests?state=opened&per_page=100&page=${page}`,
+                ),
+              )
+              .filter(
+                (row): row is z.infer<typeof gitlabMergeRequestRowSchema> =>
+                  row !== null,
+              );
+            rows.push(...batch);
+            if (batch.length < 100) break;
+          }
+          return rows;
+        })().catch(() => []),
+      ]);
+      const pipelines = z
+        .array(gitlabPipelineRowSchema.nullable().catch(null))
+        .catch([])
+        .parse(pipelinesRaw)
+        .filter((row): row is PipelineRow => row !== null);
+      const listed = gitlabBranchListSchema.parse(branchesRaw);
+      const [defaultRow] =
+        defaultRaw === null ? [] : gitlabBranchListSchema.parse([defaultRaw]);
+      const branchRows =
+        defaultRow != null && !listed.some((row) => row?.name === defaultRow.name)
+          ? [defaultRow, ...listed]
+          : listed;
+      return {
+        branches: buildBranchRows(
+          branchRows,
+          mergeRequests.map((row) => ({
+            source_branch: row.source_branch,
+            iid: row.iid,
+            title: row.title,
+            draft: row.draft,
+            work_in_progress: row.work_in_progress,
+          })),
+          pipelines,
+        ),
+      };
+    },
+
+    /** { project, jobId, lines } → the tail of a job's log. */
+    async getJobLog({ project, jobId, lines }) {
+      const log = await coreJobTrace(project, jobId, lines);
+      // Bounded by bytes as well as lines: one minified line can be huge.
+      const clipped = log.length > 200_000;
+      return {
+        log: clipped ? log.slice(log.length - 200_000) : log,
+        truncated: clipped,
+      };
+    },
+
+    /** { project, id } → retry the pipeline's failed and canceled jobs. */
+    async retryPipeline({ project, id }) {
+      const { pipeline, retried } = await coreRetryPipeline(project, id);
+      return {
+        id: pipeline.id,
+        status: pipeline.status,
+        url: pipeline.web_url,
+        retried: retried.length,
+      };
+    },
+
+    async cancelPipeline({ project, id }) {
+      const pipeline = await coreCancelPipeline(project, id);
+      return { id: pipeline.id, status: pipeline.status, url: pipeline.web_url };
+    },
+
+    /** { project, jobId, action } → retry, play, or cancel one job. */
+    async runJob({ project, jobId, action }) {
+      const job = await coreJobAction(project, jobId, action);
+      return { jobId: job.id, status: job.status, url: job.web_url };
+    },
+
+    /** { project, ref? | mergeRequestIid? } → start a new pipeline. */
+    async runPipeline({ project, ref, mergeRequestIid }) {
+      const { pipeline } = await coreRunPipeline(project, {
+        ...(ref === undefined ? {} : { ref }),
+        ...(mergeRequestIid === undefined ? {} : { mergeRequestIid }),
+      });
+      return {
+        id: pipeline.id,
+        status: pipeline.status,
+        url: pipeline.web_url,
+      };
+    },
+
+    /**
+     * { project, iid, sha, squash, removeSourceBranch, whenPipelineSucceeds } →
+     * merge. The head commit is re-read first and must be the one the person
+     * reviewed; GitLab then enforces its own rules (pipeline, approvals,
+     * threads) and a refusal comes back as a plain sentence.
+     */
+    async mergeMergeRequest({
+      project,
+      iid,
+      sha,
+      squash,
+      removeSourceBranch,
+      whenPipelineSucceeds,
+    }): Promise<{ ok: true; state: string; scheduled: boolean }> {
+      const base = `${projectApiBase(project)}/merge_requests/${iid}`;
+      const current = gitlabMergeRequestRowSchema.parse(
+        await gitlabApi(project, base),
+      );
+      const allowance = mergeAllowance({
+        state: current.state,
+        draft: current.draft || current.work_in_progress,
+        hasConflicts: current.has_conflicts,
+      });
+      if (!allowance.allowed) {
+        throw new Error(allowance.reason ?? "This merge request cannot be merged");
+      }
+      if (current.sha.length > 0 && !current.sha.startsWith(sha) && !sha.startsWith(current.sha)) {
+        throw new Error(explainMergeFailure("409 SHA does not match HEAD"));
+      }
+      let updated;
+      try {
+        updated = gitlabMergeRequestRowSchema.parse(
+          await gitlabApi(
+            project,
+            `${base}/merge?${mergeQuery({ sha, squash, removeSourceBranch, whenPipelineSucceeds })}`,
+            { method: "PUT" },
+          ),
+        );
+      } catch (error) {
+        throw new Error(
+          explainMergeFailure(error instanceof Error ? error.message : String(error)),
+        );
+      }
+      if (updated.state === "merged") {
+        patchCachedItem("mr", project, iid, { state: "merged" });
+      }
+      return {
+        ok: true,
+        state: updated.state,
+        scheduled: updated.state !== "merged" && updated.merge_when_pipeline_succeeds,
+      };
+    },
+
+    /** { project, iid, discussionId, body } → reply inside an existing thread. */
+    async replyToDiscussion({ project, iid, discussionId, body }): Promise<{ ok: true }> {
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+        { method: "POST", fields: { body } },
+      );
+      return { ok: true };
+    },
+
+    /** { project, iid, discussionId, resolved } → resolve or reopen a thread. */
+    async setDiscussionResolved({
+      project,
+      iid,
+      discussionId,
+      resolved,
+    }): Promise<{ ok: true }> {
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/merge_requests/${iid}/discussions/${encodeURIComponent(discussionId)}?resolved=${resolved}`,
+        { method: "PUT" },
+      );
+      return { ok: true };
     },
 
     /** { project, iid, body } → add an issue comment. */
@@ -2247,7 +2998,7 @@ export default async function plugin(bb: BbPluginApi) {
     "List filters (issues, mrs):",
     "  --state open|closed|merged|all   default open; merged is MRs only",
     "  --mine                           assigned to you",
-    "  --author <user|@me>  --assignee <user|@me>",
+    "  --author <user|@me>  --assignee <user|@me>  --reviewer <user|@me> (mrs)",
     "  --label <name>                   repeat to require several labels",
     "  --draft                          drafts only (mrs)",
     "  --limit <n>  --json",
@@ -2534,6 +3285,110 @@ export default async function plugin(bb: BbPluginApi) {
     return default_branch;
   }
 
+  // -------------------------------------------------------------------
+  // Pipeline core: one implementation behind both `bb gitlab` and the
+  // panel's rpc methods, so the write paths are exercised by either.
+  // -------------------------------------------------------------------
+
+  /** The last `lines` of a job's log. The trace is plain text, not JSON. */
+  async function coreJobTrace(
+    project: string,
+    jobId: number,
+    lines: number,
+  ): Promise<string> {
+    const { host } = parseProjectRef(project);
+    const trace = await glab(
+      ["api", "--hostname", host, `${projectApiBase(project)}/jobs/${jobId}/trace`],
+      60_000,
+    );
+    return tailJobLog(trace, lines);
+  }
+
+  /** Retry, play (manual), or cancel one job — only if its status allows it. */
+  async function coreJobAction(
+    project: string,
+    jobId: number,
+    action: "retry" | "play" | "cancel",
+  ): Promise<PipelineJobRow> {
+    const current = await getJob(project, jobId);
+    if (!jobActions(current.status)[action]) {
+      throw new Error(
+        `Job ${current.name} is ${current.status}; ${action} is not available for that status.`,
+      );
+    }
+    return gitlabPipelineJobRowSchema.parse(
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/jobs/${jobId}/${action}`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  /** Re-run a pipeline's failed and canceled jobs. */
+  async function coreRetryPipeline(
+    project: string,
+    pipelineId: number,
+  ): Promise<{ pipeline: PipelineRow; retried: PipelineJobRow[] }> {
+    const jobs = await listPipelineJobs(project, pipelineId);
+    const retried = retryableJobs(jobs);
+    if (retried.length === 0) {
+      throw new Error(
+        `Pipeline #${pipelineId} has no failed or canceled jobs to retry.`,
+      );
+    }
+    const pipeline = gitlabPipelineRowSchema.parse(
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/pipelines/${pipelineId}/retry`,
+        { method: "POST" },
+      ),
+    );
+    return { pipeline, retried };
+  }
+
+  async function coreCancelPipeline(
+    project: string,
+    pipelineId: number,
+  ): Promise<PipelineRow> {
+    return gitlabPipelineRowSchema.parse(
+      await gitlabApi(
+        project,
+        `${projectApiBase(project)}/pipelines/${pipelineId}/cancel`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  /** A new pipeline on a branch, or the merge-request pipeline of an MR. */
+  async function coreRunPipeline(
+    project: string,
+    options: { ref?: string; mergeRequestIid?: number },
+  ): Promise<{ pipeline: PipelineRow; ref: string | null }> {
+    const base = projectApiBase(project);
+    if (options.mergeRequestIid !== undefined) {
+      return {
+        pipeline: gitlabPipelineRowSchema.parse(
+          await gitlabApi(
+            project,
+            `${base}/merge_requests/${options.mergeRequestIid}/pipelines`,
+            { method: "POST" },
+          ),
+        ),
+        ref: null,
+      };
+    }
+    const ref = options.ref ?? (await getDefaultBranch(project));
+    return {
+      pipeline: gitlabPipelineRowSchema.parse(
+        await gitlabApi(project, `${base}/pipeline?ref=${encodeURIComponent(ref)}`, {
+          method: "POST",
+        }),
+      ),
+      ref,
+    };
+  }
+
   async function listPipelineJobs(
     project: string,
     pipelineId: number,
@@ -2561,21 +3416,10 @@ export default async function plugin(bb: BbPluginApi) {
     const failed = jobs.filter((job) => job.status === "failed");
     const logs = new Map<number, string>();
     if (command.logs > 0) {
-      const { host } = parseProjectRef(project);
       await Promise.all(
         failed.slice(0, MAX_LOGGED_JOBS).map(async (job) => {
           try {
-            // The trace is plain text, so this skips gitlabApi's JSON parse.
-            const trace = await glab(
-              [
-                "api",
-                "--hostname",
-                host,
-                `${projectApiBase(project)}/jobs/${job.id}/trace`,
-              ],
-              60_000,
-            );
-            logs.set(job.id, tailJobLog(trace, command.logs));
+            logs.set(job.id, await coreJobTrace(project, job.id, command.logs));
           } catch (error) {
             logs.set(
               job.id,
@@ -2657,14 +3501,9 @@ export default async function plugin(bb: BbPluginApi) {
     ctx: PluginCliContext,
   ): Promise<string> {
     const retryJob = async (project: string, job: PipelineJobRow) => {
-      const retried = gitlabPipelineJobRowSchema.parse(
-        await gitlabApi(
-          project,
-          `${projectApiBase(project)}/jobs/${job.id}/retry`,
-          { method: "POST" },
-        ),
-      );
-      return `Retried job ${job.name} as job ${retried.id} (${retried.status}).\n${retried.web_url}`;
+      const action = jobActions(job.status).play ? "play" : "retry";
+      const next = await coreJobAction(project, job.id, action);
+      return `${action === "play" ? "Started" : "Retried"} job ${job.name} as job ${next.id} (${next.status}).\n${next.web_url}`;
     };
 
     // A job URL with no --job retries that job, without a pipeline lookup.
@@ -2692,22 +3531,14 @@ export default async function plugin(bb: BbPluginApi) {
       }
       return retryJob(project, job);
     }
-    const retryable = jobs.filter(
-      (job) => job.status === "failed" || job.status === "canceled",
-    );
+    const retryable = retryableJobs(jobs);
     if (retryable.length === 0) {
       return (
         `Nothing to retry: pipeline #${pipeline.id} (${pipeline.status}) has no ` +
         "failed or canceled jobs. Start a fresh one with `bb gitlab run`."
       );
     }
-    const retried = gitlabPipelineRowSchema.parse(
-      await gitlabApi(
-        project,
-        `${projectApiBase(project)}/pipelines/${pipeline.id}/retry`,
-        { method: "POST" },
-      ),
-    );
+    const { pipeline: retried } = await coreRetryPipeline(project, pipeline.id);
     return [
       `Retrying ${retryable.length} job(s) in pipeline #${retried.id} (now ${retried.status}): ${retryable
         .map((job) => job.name)
@@ -2721,36 +3552,26 @@ export default async function plugin(bb: BbPluginApi) {
     ctx: PluginCliContext,
   ): Promise<string> {
     const target = await resolveCliTarget(command.target, ctx);
-    const base = projectApiBase(target.project);
     if (target.kind === "mr") {
       if (command.ref !== null) {
         throw new Error(
           "A merge-request pipeline runs on its source branch; drop --ref, or pass the project instead.",
         );
       }
-      const started = gitlabPipelineRowSchema.parse(
-        await gitlabApi(
-          target.project,
-          `${base}/merge_requests/${target.iid}/pipelines`,
-          { method: "POST" },
-        ),
-      );
-      return `Started pipeline #${started.id} for ${target.project}!${target.iid} (${started.status}).\n${started.web_url}`;
+      const { pipeline } = await coreRunPipeline(target.project, {
+        mergeRequestIid: target.iid,
+      });
+      return `Started pipeline #${pipeline.id} for ${target.project}!${target.iid} (${pipeline.status}).\n${pipeline.web_url}`;
     }
     if (target.kind !== "project") {
       throw new Error(
         "`run` takes a project or a merge request; to re-run an existing pipeline use `bb gitlab retry`.",
       );
     }
-    const ref = command.ref ?? (await getDefaultBranch(target.project));
-    const started = gitlabPipelineRowSchema.parse(
-      await gitlabApi(
-        target.project,
-        `${base}/pipeline?ref=${encodeURIComponent(ref)}`,
-        { method: "POST" },
-      ),
-    );
-    return `Started pipeline #${started.id} on ${ref} in ${target.project} (${started.status}).\n${started.web_url}`;
+    const { pipeline, ref } = await coreRunPipeline(target.project, {
+      ...(command.ref === null ? {} : { ref: command.ref }),
+    });
+    return `Started pipeline #${pipeline.id} on ${ref} in ${target.project} (${pipeline.status}).\n${pipeline.web_url}`;
   }
 
   async function cliList(
@@ -2770,7 +3591,10 @@ export default async function plugin(bb: BbPluginApi) {
     // "@me" is per host: the glab user can differ between instances.
     const viewers = new Map<string, string>();
     const usesMe =
-      filters.mine || filters.author === "@me" || filters.assignee === "@me";
+      filters.mine ||
+      filters.author === "@me" ||
+      filters.assignee === "@me" ||
+      filters.reviewer === "@me";
     if (usesMe) {
       await ensureGlab();
       const hosts = new Set(
@@ -2802,6 +3626,14 @@ export default async function plugin(bb: BbPluginApi) {
         assignee !== null &&
         !item.assignees.some(
           (name) => name.toLowerCase() === who(assignee, item.project),
+        )
+      ) {
+        return false;
+      }
+      if (
+        filters.reviewer !== null &&
+        !item.reviewers.some(
+          (name) => name.toLowerCase() === who(filters.reviewer ?? "", item.project),
         )
       ) {
         return false;
@@ -2852,7 +3684,7 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "List cached merge requests, filtered by state, author, assignee, label, draft",
         usage:
           "bb gitlab mrs [host/group/project] [--state open|closed|merged|all] [--mine] " +
-          "[--author <user|@me>] [--assignee <user|@me>] [--label <name>]... [--draft] [--limit <n>] [--json]",
+          "[--author <user|@me>] [--assignee <user|@me>] [--reviewer <user|@me>] [--label <name>]... [--draft] [--limit <n>] [--json]",
       },
       {
         name: "sync",
