@@ -5452,8 +5452,8 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "gitlab-ui",
-    title: "GitLab",
-    icon: "GitMerge",
+    title: "GitLab Interface",
+    icon: "GitBranch",
     path: PANEL_PATH,
     component: GitlabPanel,
     headerContent: PanelHeader,
