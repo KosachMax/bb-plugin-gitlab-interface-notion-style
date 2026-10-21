@@ -3519,7 +3519,7 @@ function BranchesView({
                       <span className="flex items-center gap-1.5">
                         {branch.mergeRequest !== null ? (
                           <ChipButton onClick={openMr}>Open MR</ChipButton>
-                        ) : !branch.isDefault && createUrl !== null ? (
+                        ) : !branch.isDefault && !branch.merged && createUrl !== null ? (
                           <ChipButton onClick={() => window.open(createUrl, "_blank")}>
                             Create MR ↗
                           </ChipButton>
