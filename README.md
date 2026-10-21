@@ -6,6 +6,15 @@ logged into is a host this plugin can reach.
 
 A Notion-style panel for GitLab, with a `bb gitlab-ui` CLI for agents and terminals.
 
+
+![Merge request page](docs/screenshots/merge-request.png)
+
+| Merge requests | Failed pipeline | Branches |
+|---|---|---|
+| ![Merge requests](docs/screenshots/merge-requests.png) | ![Pipeline](docs/screenshots/pipeline.png) | ![Branches](docs/screenshots/branches.png) |
+
+Screenshots use invented demo data.
+
 ## Features
 
 - **A Notion-style panel.** Issues, merge requests, pipelines, and branches are
