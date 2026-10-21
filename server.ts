@@ -2143,7 +2143,8 @@ export default async function plugin(bb: BbPluginApi) {
   ): Promise<{ labels: string[]; colors: Record<string, string> }> {
     const cached = labelsCache.get(project);
     if (cached !== undefined && Date.now() - cached.fetchedAt < 10 * 60_000) {
-      return cached;
+      // Only the contract's fields: the RPC output is strict, and fetchedAt is ours.
+      return { labels: cached.labels, colors: cached.colors };
     }
     const { path } = parseProjectRef(project);
     const rows: z.infer<typeof gitlabLabelListSchema> = [];

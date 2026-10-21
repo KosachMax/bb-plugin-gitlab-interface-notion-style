@@ -4048,7 +4048,8 @@ function readinessOf(mr: MergeRequestDetail): Readiness {
         ? { tone: "ok", label: "All resolved", caption: `Discussions · ${threads.length}` }
         : { tone: "wait", label: `${unresolved} unresolved`, caption: "Discussions" };
 
-  const mergeable = mr.mergeStatus === "mergeable";
+  // "can_be_merged" is the older spelling of the same state.
+  const mergeable = mr.mergeStatus === "mergeable" || mr.mergeStatus === "can_be_merged";
   const conflicts: Readiness["conflicts"] = mr.state !== "opened"
     ? // Merged and closed requests have nothing left to wait on.
       { tone: "neutral", label: mr.state, caption: "State" }
