@@ -21,6 +21,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { explainMergeFailure, mergeAllowance, mergeQuery } from "./lib/merge";
+import { classifyPromotion, normalizedPatch, type PromotionCommit } from "./lib/promotion";
 import {
   classifyJobStatus,
   isTerminalPipelineStatus,
@@ -460,6 +461,44 @@ export const gitlabRpcContract = defineRpcContract({
         message: "pass a ref or a merge request, not both",
       }),
     output: pipelineActionSchema,
+  },
+  /** Which of a merge request's commits are already on another branch. */
+  getMergeRequestPromotion: {
+    input: itemInputSchema
+      .extend({ target: z.string().min(1).max(255) })
+      .strict(),
+    output: z
+      .object({
+        target: z.string(),
+        /** False when the branch does not exist in this project. */
+        targetExists: z.boolean(),
+        checkedAt: z.string(),
+        /** False when the merge request had more commits than were read. */
+        complete: z.boolean(),
+        commits: z.array(
+          z
+            .object({
+              sha: z.string(),
+              title: z.string(),
+              status: z.enum(["promoted", "missing", "unknown"]),
+              basis: z.enum(["sha", "cherry-pick", "patch"]).nullable(),
+              targetSha: z.string().nullable(),
+              note: z.string(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
+  /** Start an agent thread that cherry-picks commits onto a branch via a new MR. */
+  startCherryPick: {
+    input: itemInputSchema
+      .extend({
+        target: z.string().min(1).max(255),
+        shas: z.array(z.string().regex(/^[0-9a-f]{7,40}$/i)).min(1).max(100),
+      })
+      .strict(),
+    output: z.object({ threadId: z.string().min(1) }).strict(),
   },
   mergeMergeRequest: {
     input: itemInputSchema
@@ -2701,6 +2740,177 @@ export default async function plugin(bb: BbPluginApi) {
         status: pipeline.status,
         url: pipeline.web_url,
       };
+    },
+
+    /**
+     * { project, iid, target } → for each commit of the merge request, whether
+     * it is already on `target`: by SHA (GitLab's commit refs) or by a
+     * `cherry-pick -x` line in the target's recent history.
+     */
+    async getMergeRequestPromotion({ project, iid, target }) {
+      const api = projectApiBase(project);
+      const checkedAt = new Date().toISOString();
+      try {
+        await gitlabApi(project, `${api}/repository/branches/${encodeURIComponent(target)}`);
+      } catch (error) {
+        if (/\b404\b/.test(error instanceof Error ? error.message : String(error))) {
+          return { target, targetExists: false, checkedAt, complete: true, commits: [] };
+        }
+        throw error;
+      }
+      const commitRow = z
+        .object({
+          id: z.string(),
+          title: z.string().default(""),
+          message: z.string().default(""),
+          parent_ids: z.array(z.string()).default([]),
+          created_at: z.string().default(""),
+        })
+        .passthrough();
+      const mrCommits: z.infer<typeof commitRow>[] = [];
+      let complete = true;
+      for (let page = 1; ; page += 1) {
+        const rows = z
+          .array(commitRow)
+          .parse(await gitlabApi(project, `${api}/merge_requests/${iid}/commits?per_page=100&page=${page}`));
+        mrCommits.push(...rows);
+        if (rows.length < 100) break;
+        if (page >= 5) {
+          complete = false;
+          break;
+        }
+      }
+      // GitLab lists them newest first; people read a branch oldest first.
+      mrCommits.reverse();
+
+      // Which branches each commit is on, four lookups at a time.
+      const branchesBySha = new Map<string, string[] | null>();
+      const refRow = z.object({ type: z.string(), name: z.string() }).passthrough();
+      const queue = [...mrCommits];
+      await Promise.all(
+        Array.from({ length: 4 }, async () => {
+          for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+            try {
+              const refs = z
+                .array(refRow)
+                .parse(
+                  await gitlabApi(
+                    project,
+                    `${api}/repository/commits/${next.id}/refs?type=branch&per_page=100`,
+                  ),
+                );
+              branchesBySha.set(next.id, refs.map((ref) => ref.name));
+            } catch {
+              branchesBySha.set(next.id, null);
+            }
+          }
+        }),
+      );
+
+      // Cherry-picks happen after the original commit; read the target from then.
+      const oldest = mrCommits
+        .map((entry) => Date.parse(entry.created_at))
+        .filter((time) => Number.isFinite(time))
+        .sort((a, b) => a - b)[0];
+      const since = oldest === undefined ? "" : `&since=${encodeURIComponent(new Date(oldest - 86_400_000).toISOString())}`;
+      const targetCommits: { sha: string; message: string; title: string }[] = [];
+      let targetHistoryComplete = true;
+      for (let page = 1; ; page += 1) {
+        const rows = z
+          .array(commitRow)
+          .parse(
+            await gitlabApi(
+              project,
+              `${api}/repository/commits?ref_name=${encodeURIComponent(target)}&per_page=100&page=${page}${since}`,
+            ),
+          );
+        targetCommits.push(...rows.map((row) => ({ sha: row.id, message: row.message, title: row.title })));
+        if (rows.length < 100) break;
+        if (page >= 10) {
+          targetHistoryComplete = false;
+          break;
+        }
+      }
+
+      // A cherry-pick without -x keeps the diff. Same title only picks which
+      // diffs to compare; the diff itself is the evidence.
+      const diffRow = z.object({ old_path: z.string(), new_path: z.string(), diff: z.string() }).passthrough();
+      const diffCache = new Map<string, Promise<string | null>>();
+      const patchOf = (sha: string) => {
+        let pending = diffCache.get(sha);
+        if (pending === undefined) {
+          pending = gitlabApi(project, `${api}/repository/commits/${sha}/diff?per_page=100`).then(
+            (rows) => normalizedPatch(z.array(diffRow).parse(rows)),
+            () => null,
+          );
+          diffCache.set(sha, pending);
+        }
+        return pending;
+      };
+      const onTarget = (sha: string) => branchesBySha.get(sha)?.includes(target) ?? false;
+      const samePatch = new Map<string, string>();
+      const lookalike = new Map<string, string>();
+      for (const entry of mrCommits) {
+        if (onTarget(entry.id) || entry.parent_ids.length > 1) continue;
+        const candidates = targetCommits.filter((row) => row.title.trim() === entry.title.trim()).slice(0, 3);
+        if (candidates.length === 0) continue;
+        const source = await patchOf(entry.id);
+        if (source === null || source.length === 0) continue;
+        for (const candidate of candidates) {
+          if ((await patchOf(candidate.sha)) === source) {
+            samePatch.set(entry.id, candidate.sha);
+            break;
+          }
+        }
+        if (!samePatch.has(entry.id)) lookalike.set(entry.id, candidates[0].sha);
+      }
+
+      const commits: PromotionCommit[] = classifyPromotion({
+        samePatch,
+        lookalike,
+        target,
+        commits: mrCommits.map((entry) => ({
+          sha: entry.id,
+          title: entry.title,
+          parentCount: entry.parent_ids.length,
+        })),
+        branchesBySha,
+        targetCommits,
+        targetHistoryComplete,
+      });
+      return { target, targetExists: true, checkedAt, complete, commits };
+    },
+
+    /** { project, iid, target, shas } → a thread that cherry-picks them via a new MR. */
+    async startCherryPick({ project, iid, target, shas }) {
+      const item = getCachedItem("mr", project, iid);
+      const title = item?.title ?? `merge request !${iid}`;
+      const ref = `${project}!${iid}`;
+      const branch = `cherry-pick/mr-${iid}-to-${target.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
+      const prompt = [
+        `Cherry-pick commits of GitLab merge request ${ref} ("${title}") onto ${target}.`,
+        "",
+        "Commits, oldest first:",
+        ...shas.map((sha) => `  ${sha}`),
+        "",
+        "Steps:",
+        `1. git fetch origin && git switch -c ${branch} origin/${target}`,
+        `2. git cherry-pick -x ${shas.join(" ")}`,
+        "   If a commit conflicts, stop and ask me before resolving anything; do not change the patch on your own.",
+        `3. git push -u origin ${branch}`,
+        `4. glab mr create -R ${project} --source-branch ${branch} --target-branch ${target} --title "Cherry-pick !${iid} to ${target}" --description "Cherry-pick of !${iid} (${shas.length} commit${shas.length === 1 ? "" : "s"}) with git cherry-pick -x."`,
+        "",
+        `Never push to ${target} directly. Report the new merge request link when done.`,
+      ].join("\n");
+      const thread = await bb.sdk.threads.spawn({
+        projectId: await resolveBbProjectId(project),
+        environment: { type: "project-default" },
+        title: `Cherry-pick !${iid} → ${target}`.slice(0, 120),
+        prompt,
+      });
+      await addLink({ kind: "mr", project, iid, threadId: thread.id, createdAt: new Date().toISOString() });
+      bb.log.info(`spawned cherry-pick thread ${thread.id} for ${ref} → ${target}`);
+      return { threadId: thread.id };
     },
 
     /**

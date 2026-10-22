@@ -4412,7 +4412,451 @@ function MergeDialog({
   );
 }
 
-type MrTab = "overview" | "changes" | "pipeline" | "discussion";
+type MrTab = "overview" | "commits" | "changes" | "pipeline" | "discussion";
+// ---------------------------------------------------------------------------
+// Promotion: which of a merge request's commits are already on another branch
+// (stage-1 by default, remembered per project), and cherry-picking the rest.
+// ---------------------------------------------------------------------------
+
+interface PromotionCommitView {
+  sha: string;
+  title: string;
+  status: "promoted" | "missing" | "unknown";
+  basis: "sha" | "cherry-pick" | "patch" | null;
+  targetSha: string | null;
+  note: string;
+}
+
+interface PromotionView {
+  target: string;
+  targetExists: boolean;
+  checkedAt: string;
+  complete: boolean;
+  commits: PromotionCommitView[];
+}
+
+const DEFAULT_PROMOTION_TARGET = "stage-1";
+
+function usePromotion(project: string, iid: number, headSha: string) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const targetKey = `gitlab-ui:promotion-target:${project}`;
+  const [target, setTargetState] = useState(
+    () => readStored(targetKey) ?? DEFAULT_PROMOTION_TARGET,
+  );
+  const cacheKey = `promotion:${project}!${iid}:${target}:${headSha}`;
+  const [data, setData] = useState<PromotionView | null>(() => cachedRead<PromotionView>(cacheKey));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setLoading(true);
+    rpc
+      .call("getMergeRequestPromotion", { project, iid, target })
+      .then(
+        (result) => {
+          cachedWrite(cacheKey, result);
+          setData(result);
+          setError(null);
+        },
+        (err: unknown) => setError(errorText(err)),
+      )
+      .finally(() => setLoading(false));
+  }, [rpc, project, iid, target, cacheKey]);
+  useEffect(() => {
+    setData(cachedRead<PromotionView>(cacheKey));
+    load();
+  }, [load, cacheKey]);
+  const setTarget = useCallback(
+    (next: string) => {
+      writeStored(targetKey, next);
+      setTargetState(next);
+    },
+    [targetKey],
+  );
+  return { target, setTarget, data, loading, error, reload: load };
+}
+
+type PromotionState = ReturnType<typeof usePromotion>;
+
+const PROMOTION_LABEL: Record<PromotionCommitView["status"], { text: string; className: string }> = {
+  promoted: { text: "✅ Перенесён", className: "bg-[rgb(219,237,219)] text-[rgb(28,56,41)] [.dark_&]:bg-[rgb(36,61,48)] [.dark_&]:text-[rgb(108,194,140)]" },
+  missing: { text: "⭕ Не перенесён", className: "bg-[rgb(253,236,200)] text-[rgb(64,44,27)] [.dark_&]:bg-[rgb(86,67,40)] [.dark_&]:text-[rgb(230,190,110)]" },
+  unknown: { text: "❓ Не проверено", className: "bg-foreground/[0.06] text-foreground/80" },
+};
+
+/** The fifth readiness tile: how much of the merge request is on the target. */
+function PromotionCell({ promo, onClick }: { promo: PromotionState; onClick: () => void }) {
+  const data = promo.data;
+  const commits = data?.commits ?? [];
+  const promoted = commits.filter((c) => c.status === "promoted").length;
+  const missing = commits.filter((c) => c.status === "missing").length;
+  let value: string;
+  if (promo.error !== null && data === null) value = "❓ Ошибка";
+  else if (data === null) value = "⏳ Проверяю…";
+  else if (!data.targetExists) value = "— Ветки нет";
+  else if (commits.length === 0) value = "— Нет коммитов";
+  else value = `${promoted === commits.length ? "✅" : missing > 0 ? "🟡" : "❓"} ${promoted} из ${commits.length}`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={promo.error ?? undefined}
+      className={cn(
+        "flex min-w-0 flex-col gap-0.5 rounded-md px-3 py-2 text-left transition-colors",
+        missing > 0
+          ? "bg-[rgb(253,236,200)] hover:brightness-[.98] [.dark_&]:bg-[rgb(86,67,40)]"
+          : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
+      )}
+    >
+      <span className="truncate text-xs text-muted-foreground">Перенесено в {promo.target}</span>
+      <span className="truncate font-semibold text-foreground">{value}</span>
+    </button>
+  );
+}
+
+function BranchTargetPicker({
+  project,
+  value,
+  onChange,
+}: {
+  project: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const [branches, setBranches] = useState<string[] | null>(null);
+  return (
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (!open || branches !== null) return;
+        rpc.call("listBranches", { project, limit: 100 }).then(
+          (result) => setBranches(result.branches.map((entry) => entry.name)),
+          () => setBranches([]),
+        );
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex h-6 items-center gap-1 rounded px-1.5 font-mono text-[13px] text-foreground transition-colors hover:bg-state-hover data-[state=open]:bg-state-hover"
+        >
+          {value}
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+        </button>
+      </DropdownMenuTrigger>
+      <SearchableMenuContent title="Ветки" placeholder="Найти ветку…">
+        {(query) => {
+          if (branches === null) return <div className="px-3 py-2 text-sm text-muted-foreground">Загружаю…</div>;
+          const shown = branches.filter((name) => matchesQuery(name, query));
+          if (shown.length === 0) return <NoMatches query={query} />;
+          return shown.map((name) => (
+            <DropdownMenuItem key={name} className="font-mono text-[13px]" onSelect={() => onChange(name)}>
+              {name}
+              {name === value ? <span className="ml-auto pl-2 font-sans text-xs">✓</span> : null}
+            </DropdownMenuItem>
+          ));
+        }}
+      </SearchableMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function CopySha({ sha }: { sha: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      title="Скопировать SHA"
+      className="relative -ml-[3px] mr-1 rounded-[3px] px-[3px] font-mono text-[12px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+      onClick={(event) => {
+        event.stopPropagation();
+        navigator.clipboard.writeText(sha).then(
+          () => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          },
+          () => toast.error("Не удалось скопировать"),
+        );
+      }}
+    >
+      {sha.slice(0, 8)}
+      {copied ? (
+        <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-[rgb(15,15,15)] px-[7px] py-[5px] font-sans text-[12px] font-medium leading-none text-white">
+          Скопировано
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function CommitsTab({
+  project,
+  iid,
+  promo,
+}: {
+  project: string;
+  iid: number;
+  promo: PromotionState;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const navigate = useBbNavigate();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // A button that appears under the pointer is not clickable for a moment, so
+  // a double click on "select" cannot start a cherry-pick.
+  const [armedAt, setArmedAt] = useState(0);
+  const [, forceTick] = useState(0);
+  const [confirm, setConfirm] = useState<string[] | null>(null);
+  const [starting, setStarting] = useState(false);
+  const data = promo.data;
+  const commits = data?.commits ?? [];
+  const missing = commits.filter((c) => c.status === "missing");
+  useEffect(() => setSelected(new Set()), [promo.target]);
+  const armed = Date.now() - armedAt >= 600;
+  useEffect(() => {
+    if (armed) return;
+    const timer = setTimeout(() => forceTick((n) => n + 1), 600 - (Date.now() - armedAt));
+    return () => clearTimeout(timer);
+  }, [armed, armedAt]);
+
+  const toggle = (sha: string, on: boolean) => {
+    if (selected.size === 0) setArmedAt(Date.now());
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(sha);
+      else next.delete(sha);
+      return next;
+    });
+  };
+  const start = (shas: string[]) => {
+    setStarting(true);
+    rpc
+      .call("startCherryPick", { project, iid, target: promo.target, shas })
+      .then((result) => {
+        setConfirm(null);
+        setSelected(new Set());
+        navigate.toThread(result.threadId);
+      })
+      .catch((err: unknown) => toast.error(errorText(err)))
+      .finally(() => setStarting(false));
+  };
+  // Keep the merge request's order (oldest first) whatever was clicked first.
+  const ordered = (shas: Iterable<string>) => {
+    const set = new Set(shas);
+    return commits.filter((c) => set.has(c.sha)).map((c) => c.sha);
+  };
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground">
+        {selected.size > 0 ? (
+          <>
+            <span className="font-medium text-[rgb(35,131,226)]">Выбрано {selected.size}</span>
+            <button type="button" className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setSelected(new Set())}>
+              Снять выбор
+            </button>
+            <span className="flex-1" />
+            <button
+              type="button"
+              disabled={!armed}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[rgb(35,131,226)] px-3 text-sm font-medium text-white transition-colors hover:bg-[rgb(0,117,211)] disabled:opacity-40"
+              onClick={() => setConfirm(ordered(selected))}
+            >
+              🍒 Cherry-pick в {promo.target}…
+            </button>
+          </>
+        ) : (
+          <>
+            <span>Перенос в</span>
+            <BranchTargetPicker project={project} value={promo.target} onChange={promo.setTarget} />
+            <span>
+              ·{" "}
+              {promo.loading
+                ? "проверяю…"
+                : data !== null
+                  ? `проверено ${relativeTime(data.checkedAt)}`
+                  : ""}
+            </span>
+            <span className="flex-1" />
+            {missing.length > 0 ? (
+              <button
+                type="button"
+                className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground"
+                onClick={() => {
+                  setArmedAt(Date.now());
+                  setSelected(new Set(missing.map((c) => c.sha)));
+                }}
+              >
+                Выбрать непереносённые ({missing.length})
+              </button>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      {promo.error !== null && data === null ? (
+        <Callout icon="⚠️">{promo.error}</Callout>
+      ) : data === null ? (
+        <div className="flex flex-col gap-2 py-2">
+          {[0, 1, 2].map((row) => <Skeleton key={row} className="h-10 w-full" />)}
+        </div>
+      ) : !data.targetExists ? (
+        <p className="py-3 text-sm text-muted-foreground">
+          Ветки <span className="font-mono">{data.target}</span> нет в этом проекте. Выберите другую.
+        </p>
+      ) : (
+        <div className={cn("group/list shadow-[inset_0_1px_0_var(--border)]", selected.size > 0 && "selecting")}>
+          {commits.map((commit) => {
+            const label = PROMOTION_LABEL[commit.status];
+            return (
+              <div
+                key={commit.sha}
+                className="group/row relative grid min-h-[52px] grid-cols-[28px_minmax(0,1fr)_132px] items-center py-1.5 pr-1 shadow-[inset_0_-1px_0_var(--border)] hover:bg-state-hover"
+              >
+                <span className="flex justify-center">
+                  {commit.status !== "promoted" ? (
+                    <input
+                      type="checkbox"
+                      aria-label={`Выбрать ${commit.sha.slice(0, 8)}`}
+                      checked={selected.has(commit.sha)}
+                      onChange={(event) => toggle(commit.sha, event.target.checked)}
+                      className={cn(
+                        "size-3.5 cursor-pointer accent-[rgb(35,131,226)] transition-opacity focus-visible:opacity-100",
+                        selected.has(commit.sha) || selected.size > 0 ? "opacity-100" : "opacity-0 group-hover/row:opacity-100",
+                      )}
+                    />
+                  ) : null}
+                </span>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-foreground">
+                    <CopySha sha={commit.sha} />
+                    {commit.title}
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">{commit.note}</div>
+                </div>
+                <span className={cn("inline-flex h-5 items-center justify-self-start whitespace-nowrap rounded-[3px] px-1.5 text-[13px]", label.className)}>
+                  {label.text}
+                </span>
+                {commit.status !== "promoted" ? (
+                  <span className="pointer-events-none absolute right-[140px] top-1/2 flex -translate-y-1/2 gap-0.5 rounded-md bg-background p-0.5 opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
+                    {commit.status === "unknown" ? (
+                      <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={promo.reload}>
+                        🔄 Проверить
+                      </button>
+                    ) : null}
+                    <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setConfirm([commit.sha])}>
+                      {commit.status === "unknown" ? "Перенести" : "🍒 Cherry-pick"}
+                    </button>
+                  </span>
+                ) : null}
+              </div>
+            );
+          })}
+          {!data.complete ? (
+            <p className="pt-2 text-xs text-muted-foreground">Показаны первые 500 коммитов.</p>
+          ) : null}
+        </div>
+      )}
+      <p className="pt-2.5 text-xs text-muted-foreground">
+        Перенесён — коммит есть в выбранной ветке: по SHA, по метке <span className="font-mono">cherry-pick -x</span> или с тем же диффом. Заголовок сам по себе не считается доказательством.
+      </p>
+
+      <Dialog open={confirm !== null} onOpenChange={(open) => !open && !starting && setConfirm(null)}>
+        <DialogContent className="max-w-md rounded-xl" onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (event.currentTarget as HTMLElement).querySelector<HTMLElement>("[data-cancel]")?.focus();
+        }}>
+          <DialogHeader>
+            <DialogTitle>
+              Перенести {confirm?.length ?? 0} {confirm?.length === 1 ? "коммит" : "коммита"} в {promo.target}?
+            </DialogTitle>
+            <DialogDescription>
+              Агент создаст ветку от <span className="font-mono">{promo.target}</span>, выполнит{" "}
+              <span className="font-mono">cherry-pick -x</span> по порядку и откроет MR. При конфликте остановится и спросит.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-52 overflow-auto rounded-md py-1 shadow-[inset_0_0_0_1px_var(--border)]">
+            {commits
+              .filter((c) => confirm?.includes(c.sha))
+              .map((c) => (
+                <div key={c.sha} className="truncate px-2.5 py-1 text-sm">
+                  <span className="mr-1.5 font-mono text-[12px] text-muted-foreground">{c.sha.slice(0, 8)}</span>
+                  {c.title}
+                </div>
+              ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
+              Отмена
+            </Button>
+            <Button disabled={starting} onClick={() => confirm !== null && start(confirm)}>
+              {starting ? "Запускаю…" : "Запустить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/** Merge is red when GitLab will refuse it; hovering says why. */
+function MergeButton({
+  mr,
+  readiness,
+  onMerge,
+  onShow,
+}: {
+  mr: MergeRequestDetail;
+  readiness: Readiness;
+  onMerge: () => void;
+  onShow: (tab: MrTab) => void;
+}) {
+  const allowance = mergeAllowance(mr);
+  const reasons: Array<{ emoji: string; title: string; hint: string; tab: MrTab }> = [];
+  if (readiness.pipeline.tone === "bad") reasons.push({ emoji: "❌", title: "Пайплайн упал", hint: "Открыть пайплайн", tab: "pipeline" });
+  if (readiness.conflicts.tone === "bad") reasons.push({ emoji: "⚠️", title: "Есть конфликты", hint: `Нужен rebase на ${mr.targetBranch}`, tab: "changes" });
+  if (readiness.discussions.tone === "wait") reasons.push({ emoji: "💬", title: readiness.discussions.label, hint: "Ответьте или закройте треды", tab: "discussion" });
+  const red = reasons.length > 0;
+  return (
+    <span className="group/merge relative inline-flex">
+      <button
+        type="button"
+        disabled={!allowance.allowed}
+        title={allowance.allowed ? undefined : allowance.reason ?? undefined}
+        onClick={onMerge}
+        className={cn(
+          "inline-flex h-8 items-center rounded-md px-3 text-sm font-medium text-white transition-colors disabled:opacity-40",
+          red ? "bg-[rgb(212,76,71)] hover:bg-[rgb(190,62,58)]" : "bg-[rgb(68,131,97)] hover:bg-[rgb(56,114,83)]",
+        )}
+      >
+        {red || readiness.blockers.length > 0 ? "Merge…" : "Merge"}
+      </button>
+      {red ? (
+        <div
+          role="tooltip"
+          className="invisible absolute bottom-[calc(100%+8px)] right-0 z-20 w-[300px] rounded-lg bg-popover py-2 text-popover-foreground opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity after:absolute after:inset-x-0 after:-bottom-2.5 after:h-2.5 group-focus-within/merge:visible group-focus-within/merge:opacity-100 group-hover/merge:visible group-hover/merge:opacity-100"
+        >
+          <div className="px-3.5 pb-1.5 text-xs font-medium text-muted-foreground">Почему нельзя влить</div>
+          {reasons.map((reason) => (
+            <button
+              key={reason.title}
+              type="button"
+              onClick={() => onShow(reason.tab)}
+              className="mx-1 flex w-[calc(100%-8px)] items-start gap-2.5 rounded px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-state-hover"
+            >
+              <span aria-hidden="true">{reason.emoji}</span>
+              <span className="min-w-0">
+                <span className="block first-letter:uppercase">{reason.title}</span>
+                <span className="block text-xs text-muted-foreground">{reason.hint}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
 
 function MergeRequestDetailView({
   project,
@@ -4441,7 +4885,7 @@ function MergeRequestDetailView({
   const tabKey = `mr-tab:${project}!${iid}`;
   const rememberedTab = (): MrTab => {
     const known = stickyStore.get(tabKey) ?? readStored(tabKey);
-    return known === "changes" || known === "pipeline" || known === "discussion"
+    return known === "commits" || known === "changes" || known === "pipeline" || known === "discussion"
       ? known
       : "overview";
   };
@@ -4540,6 +4984,8 @@ function MergeRequestDetailView({
     [setLabels, project, iid, load],
   );
 
+  const promo = usePromotion(project, iid, mrState?.headSha ?? "");
+
   if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
   if (mrState === null) return <PageSkeleton />;
 
@@ -4563,6 +5009,21 @@ function MergeRequestDetailView({
 
   const tabs: Array<{ id: MrTab; label: string; badge?: { text: string; bad: boolean } }> = [
     { id: "overview", label: "Overview" },
+    {
+      id: "commits",
+      label: "Commits",
+      ...(promo.data !== null && promo.data.commits.length > 0
+        ? {
+            badge: {
+              text: (() => {
+                const left = promo.data.commits.filter((c) => c.status === "missing").length;
+                return left > 0 ? `⭕ ${left}` : String(promo.data.commits.length);
+              })(),
+              bad: false,
+            },
+          }
+        : {}),
+    },
     {
       id: "changes",
       label: "Changes",
@@ -4600,6 +5061,7 @@ function MergeRequestDetailView({
             >
               {spawningKey !== null ? "Starting…" : compact ? "⚡ Review" : "⚡ Review with agent"}
             </GhostButton>
+            <GhostButton onClick={() => window.open(mr.url, "_blank")}>Open in GitLab ↗</GhostButton>
             <PageMoreMenu url={mr.url} />
           </>
         }
@@ -4624,11 +5086,12 @@ function MergeRequestDetailView({
           <span title={formatDateTime(mr.updatedAt)}>updated {relativeTime(mr.updatedAt)}</span>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 pb-2 @[640px]:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 pb-2 @[640px]:grid-cols-5">
           <ReadinessCell {...readiness.review} onClick={() => setTab("overview")} />
           <ReadinessCell {...readiness.pipeline} onClick={() => setTab("pipeline")} />
           <ReadinessCell {...readiness.discussions} onClick={() => setTab("discussion")} />
-          <ReadinessCell {...readiness.conflicts} onClick={() => setTab("overview")} />
+          <ReadinessCell {...readiness.conflicts} onClick={() => setTab("changes")} />
+          <PromotionCell promo={promo} onClick={() => setTab("commits")} />
         </div>
         <ReviewLine mr={mr} />
         <div className="flex flex-wrap items-center gap-2 pb-4 pt-0">
@@ -4665,29 +5128,14 @@ function MergeRequestDetailView({
                 Merge scheduled: waiting for the pipeline
               </span>
             ) : (
-              <PrimaryButton
-                disabled={!mergeAllowance(mr).allowed}
-                title={mergeAllowance(mr).reason ?? "Merge this merge request"}
-                className={
-                  readiness.blockers.length > 0 && mergeAllowance(mr).allowed
-                    ? "border border-border bg-transparent text-foreground hover:bg-state-hover"
-                    : undefined
-                }
-                onClick={() => setMergeOpen(true)}
-              >
-                {readiness.blockers.length > 0 ? "Merge…" : "Merge"}
-              </PrimaryButton>
+              <MergeButton
+                mr={mr}
+                readiness={readiness}
+                onMerge={() => setMergeOpen(true)}
+                onShow={setTab}
+              />
             )
           ) : null}
-          <a
-            href={mr.url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-sm text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
-          >
-            <Icon path={ICONS.external} size={14} />
-            Open in GitLab
-          </a>
         </div>
 
         <MergeDialog
@@ -4735,6 +5183,9 @@ function MergeRequestDetailView({
           ))}
         </div>
 
+        {tab === "commits" ? (
+          <CommitsTab project={project} iid={iid} promo={promo} />
+        ) : (
         <div className="grid grid-cols-1 gap-8 @[640px]:grid-cols-[minmax(0,1fr)_240px]">
           <div className="flex min-w-0 flex-col gap-5">
             {tab === "overview" ? (
@@ -4876,6 +5327,7 @@ function MergeRequestDetailView({
             </RailSection>
           </aside>
         </div>
+        )}
       </article>
     </div>
   );
