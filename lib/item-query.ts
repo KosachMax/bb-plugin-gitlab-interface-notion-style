@@ -32,6 +32,8 @@ export interface ParsedItemQuery {
   assignees: string[];
   reviewers: string[];
   authors: string[];
+  /** `review:@me` — reviewer or assignee, on someone else's merge request. */
+  review: string[];
   labels: string[];
   projects: string[];
   noAssignee: boolean;
@@ -66,6 +68,7 @@ export function parseItemQuery(query: string): ParsedItemQuery {
     assignees: [],
     reviewers: [],
     authors: [],
+    review: [],
     labels: [],
     projects: [],
     noAssignee: false,
@@ -87,6 +90,8 @@ export function parseItemQuery(query: string): ParsedItemQuery {
       parsed.assignees.push(value.toLowerCase());
     } else if (key === "reviewer") {
       parsed.reviewers.push(value.toLowerCase());
+    } else if (key === "review") {
+      parsed.review.push(value.toLowerCase());
     } else if (key === "author") {
       parsed.authors.push(value.toLowerCase());
     } else if (key === "label") {
@@ -141,6 +146,21 @@ export function matchesItemQuery(
       return false;
     }
   }
+  if (query.review.length > 0) {
+    // Teams put people on a review as reviewer or as assignee; either counts,
+    // but never on their own merge request.
+    const wanted = resolveLogins(query.review, viewer);
+    const involved = [...item.assignees, ...(item.reviewers ?? [])].map((login) =>
+      login.toLowerCase(),
+    );
+    if (
+      !wanted.some(
+        (login) => involved.includes(login) && item.author.toLowerCase() !== login,
+      )
+    ) {
+      return false;
+    }
+  }
   if (query.authors.length > 0) {
     const wanted = resolveLogins(query.authors, viewer);
     if (!wanted.includes(item.author.toLowerCase())) return false;
@@ -171,6 +191,7 @@ export const QUALIFIER_KEYS: { key: string; hint: string }[] = [
   { key: "assignee:", hint: "assigned user, or @me" },
   { key: "reviewer:", hint: "review requested from, or @me" },
   { key: "author:", hint: "opened by" },
+  { key: "review:", hint: "reviewer or assignee on someone else's MR, or @me" },
   { key: "label:", hint: "has label" },
   { key: "project:", hint: "in project" },
   { key: "no:", hint: "missing — assignee, reviewer, label" },

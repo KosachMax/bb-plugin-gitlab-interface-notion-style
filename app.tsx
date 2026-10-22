@@ -1514,6 +1514,10 @@ function SearchBox({
 // ---------------------------------------------------------------------------
 
 const CELL = "h-9 border-r border-border/70 px-2 align-middle last:border-r-0";
+/** The title column stays put while the rest of a wide table scrolls. */
+const NAME_WIDTH = 340;
+const STICKY_CELL =
+  "sticky left-0 z-[1] bg-background group-hover:bg-[color-mix(in_srgb,var(--background),var(--foreground)_4%)] group-focus-visible:bg-[color-mix(in_srgb,var(--background),var(--foreground)_4%)]";
 
 function HeaderCell({
   icon,
@@ -1678,16 +1682,16 @@ function ItemRow({
   const busy = spawningKey === linkKey(item.kind, item.project, item.iid);
   return (
     <tr
-      className="group cursor-pointer border-b border-border/70 outline-none focus-visible:bg-state-hover"
+      className="group cursor-pointer border-b border-border/70 outline-none hover:bg-state-hover focus-visible:bg-state-hover"
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter" && event.target === event.currentTarget) onOpen();
       }}
     >
-      <td className={cn(CELL, "relative")}>
+      <td className={cn(CELL, STICKY_CELL)}>
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="min-w-0 truncate font-medium text-foreground">
+          <span className="min-w-0 truncate font-medium text-foreground" title={item.title}>
             {item.title}
           </span>
           <ThreadPills links={links} />
@@ -1723,21 +1727,20 @@ function ItemRow({
           <RowMenu item={item} />
         </span>
       </td>
-      <td className={cn(CELL, "text-muted-foreground")}>
-        {MARKER[item.kind]}
-        {item.iid}
+      <td className={CELL}>
+        <PeopleCell names={[item.author]} />
       </td>
       <td className={CELL}>
         <StatusCell item={item} />
-      </td>
-      <td className={CELL}>
-        <PeopleCell names={item.assignees} />
       </td>
       {item.kind === "mr" ? (
         <td className={CELL}>
           <PeopleCell names={item.reviewers} />
         </td>
       ) : null}
+      <td className={CELL}>
+        <PeopleCell names={item.assignees} />
+      </td>
       <td className={CELL}>
         <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
           <LabelTags labels={item.labels} max={3} />
@@ -1753,6 +1756,10 @@ function ItemRow({
         title={formatDateTime(item.updatedAt)}
       >
         {relativeTime(item.updatedAt)}
+      </td>
+      <td className={cn(CELL, "text-muted-foreground")}>
+        {MARKER[item.kind]}
+        {item.iid}
       </td>
     </tr>
   );
@@ -1777,7 +1784,10 @@ function ItemsTable({
 }) {
   const links = useLinks();
   const noun = kind === "mr" ? "merge requests" : "issues";
-  const columns = 6 + (showProject ? 1 : 0) + (kind === "mr" ? 1 : 0);
+  const columns = 7 + (showProject ? 1 : 0) + (kind === "mr" ? 1 : 0);
+  // The name keeps its width; everything else scrolls sideways under it.
+  const minWidth =
+    NAME_WIDTH + 170 + 112 + (kind === "mr" ? 170 : 0) + 170 + 200 + (showProject ? 150 : 0) + 96 + 76;
 
   let rows: React.ReactNode;
   if (error !== null) {
@@ -1821,35 +1831,35 @@ function ItemsTable({
   return (
     <div className="overflow-x-auto">
       <table
-        className={cn(
-          "w-full table-fixed border-collapse text-sm",
-          columns >= 8 ? "min-w-[1240px]" : columns === 7 ? "min-w-[1080px]" : "min-w-[900px]",
-        )}
+        className="w-full table-fixed border-collapse text-sm"
+        style={{ minWidth }}
       >
         <colgroup>
-          <col />
-          <col className="w-[76px]" />
-          <col className="w-[104px]" />
+          <col style={{ width: NAME_WIDTH }} />
           <col className="w-[170px]" />
+          <col className="w-[112px]" />
           {kind === "mr" ? <col className="w-[170px]" /> : null}
+          <col className="w-[170px]" />
           <col className="w-[200px]" />
           {showProject ? <col className="w-[150px]" /> : null}
           <col className="w-[96px]" />
+          <col className="w-[76px]" />
         </colgroup>
         <thead>
           <tr className="border-b border-border/70">
-            <HeaderCell icon={ICONS.title}>Name</HeaderCell>
-            <HeaderCell icon={ICONS.hash}>ID</HeaderCell>
+            <HeaderCell icon={ICONS.title} className={STICKY_CELL}>Name</HeaderCell>
+            <HeaderCell icon={ICONS.user}>Author</HeaderCell>
             <HeaderCell icon={ICONS.status}>Status</HeaderCell>
-            <HeaderCell icon={ICONS.users}>Assignee</HeaderCell>
             {kind === "mr" ? (
               <HeaderCell icon={ICONS.users}>Reviewer</HeaderCell>
             ) : null}
+            <HeaderCell icon={ICONS.users}>Assignee</HeaderCell>
             <HeaderCell icon={ICONS.list}>Labels</HeaderCell>
             {showProject ? (
               <HeaderCell icon={ICONS.folder}>Project</HeaderCell>
             ) : null}
             <HeaderCell icon={ICONS.clock}>Updated</HeaderCell>
+            <HeaderCell icon={ICONS.hash}>ID</HeaderCell>
           </tr>
         </thead>
         <tbody>
@@ -1871,7 +1881,7 @@ function ItemsTable({
         {items !== null && items.length > 0 ? (
           <tfoot>
             <tr>
-              <td className="h-9 px-2 text-right">
+              <td className="sticky left-0 h-9 bg-background px-2 text-right">
                 <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
                   Count
                 </span>
@@ -1884,6 +1894,64 @@ function ItemsTable({
           </tfoot>
         ) : null}
       </table>
+    </div>
+  );
+}
+
+/**
+ * One-click views over the same filter grammar: "my reviews" means reviewer
+ * or assignee on someone else's merge request, since teams use both.
+ */
+function QuickViews({
+  kind,
+  query,
+  onQuery,
+}: {
+  kind: Kind;
+  query: string;
+  onQuery: (query: string) => void;
+}) {
+  const views =
+    kind === "mr"
+      ? [
+          { key: "review", label: "👀 Мне на ревью" },
+          { key: "author", label: "✍️ Мои" },
+        ]
+      : [
+          { key: "assignee", label: "🙋 На мне" },
+          { key: "author", label: "✍️ Мои" },
+        ];
+  const active = (key: string) =>
+    queryTokens(query).some((token) => token.key === key && token.value.toLowerCase() === "@me");
+  const exclusive = (key: string) =>
+    withoutQualifiers(query, (k, v) => views.some((view) => view.key === k) && v.toLowerCase() === "@me" && k !== key);
+  return (
+    <div className="flex flex-wrap items-center gap-1 pb-2">
+      {views.map((view) => {
+        const on = active(view.key);
+        return (
+          <button
+            key={view.key}
+            type="button"
+            aria-pressed={on}
+            onClick={() =>
+              onQuery(
+                on
+                  ? withoutQualifiers(query, (k, v) => k === view.key && v.toLowerCase() === "@me")
+                  : withQualifier(exclusive(view.key), view.key, "@me"),
+              )
+            }
+            className={cn(
+              "inline-flex h-7 items-center rounded-md px-2 text-sm transition-colors",
+              on
+                ? "bg-[rgba(35,131,226,.12)] font-medium text-[rgb(35,131,226)]"
+                : "text-muted-foreground hover:bg-state-hover hover:text-foreground",
+            )}
+          >
+            {view.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1952,6 +2020,7 @@ function DatabaseView({
           </PrimaryButton>
         ) : null}
       </div>
+      <QuickViews kind={kind} query={query} onQuery={onQuery} />
       {showFilters ? (
         <div className="pb-2">
           <FilterBar

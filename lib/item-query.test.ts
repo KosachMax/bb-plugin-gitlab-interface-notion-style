@@ -238,9 +238,26 @@ describe("reviewer qualifier", () => {
     const vocab = { users: ["Ilya", "Dana"], labels: [], projects: [] };
     expect(suggestQueryTokens("rev", vocab, "mr", null).map((s) => s.insert)).toEqual([
       "reviewer:",
+      "review:",
     ]);
     expect(
       suggestQueryTokens("reviewer:il", vocab, "mr", null).map((s) => s.label),
     ).toEqual(["Ilya"]);
+  });
+});
+
+describe("review qualifier", () => {
+  const mr = (o: Partial<QueryableItem>): QueryableItem => ({
+    kind: "mr", project: "h/g/p", iid: 1, title: "t", state: "opened", draft: false,
+    author: "ann", labels: [], assignees: [], reviewers: [], ...o,
+  });
+  const q = parseItemQuery("review:@me");
+  it("matches when I am reviewer or assignee on someone else's MR", () => {
+    expect(matchesItemQuery(mr({ reviewers: ["me"] }), q, "me")).toBe(true);
+    expect(matchesItemQuery(mr({ assignees: ["Me"] }), q, "me")).toBe(true);
+  });
+  it("skips my own merge requests and ones I am not on", () => {
+    expect(matchesItemQuery(mr({ author: "me", assignees: ["me"] }), q, "me")).toBe(false);
+    expect(matchesItemQuery(mr({ reviewers: ["bob"] }), q, "me")).toBe(false);
   });
 });
