@@ -1515,7 +1515,6 @@ function SearchBox({
 
 const CELL = "h-9 border-r border-border/70 px-2 align-middle last:border-r-0";
 /** The title column stays put while the rest of a wide table scrolls. */
-const NAME_WIDTH = 340;
 const STICKY_CELL =
   "sticky left-0 z-[1] bg-background group-hover:bg-[color-mix(in_srgb,var(--background),var(--foreground)_4%)] group-focus-visible:bg-[color-mix(in_srgb,var(--background),var(--foreground)_4%)]";
 
@@ -1523,16 +1522,20 @@ function HeaderCell({
   icon,
   children,
   className,
+  resize,
 }: {
   icon: string;
   children: React.ReactNode;
   className?: string;
+  /** Makes the column's right edge draggable; double-click restores the default. */
+  resize?: { width: number; onWidth: (width: number) => void; onReset: () => void };
 }) {
   return (
     <th
       scope="col"
       className={cn(
-        "h-9 px-2 text-left align-middle text-sm font-normal text-muted-foreground",
+        "group/th h-9 px-2 text-left align-middle text-sm font-normal text-muted-foreground",
+        resize !== undefined && "relative",
         className,
       )}
     >
@@ -1540,8 +1543,86 @@ function HeaderCell({
         <Icon path={icon} />
         <span className="truncate">{children}</span>
       </span>
+      {resize !== undefined ? (
+        <span
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize column"
+          title="Drag to resize · double-click to reset"
+          className="absolute -right-1 top-0 z-[2] flex h-full w-2 cursor-col-resize touch-none justify-center"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const handle = event.currentTarget;
+            // A second press within 350 ms is a double-click: reset, don't drag.
+            const last = Number(handle.dataset.lastDown ?? 0);
+            handle.dataset.lastDown = String(event.timeStamp);
+            if (event.timeStamp - last < 350) {
+              resize.onReset();
+              return;
+            }
+            handle.setPointerCapture(event.pointerId);
+            const startX = event.clientX;
+            const startWidth = resize.width;
+            const move = (next: PointerEvent) => resize.onWidth(startWidth + next.clientX - startX);
+            const up = () => {
+              handle.removeEventListener("pointermove", move);
+              handle.removeEventListener("pointerup", up);
+              handle.removeEventListener("pointercancel", up);
+              document.body.style.cursor = "";
+            };
+            document.body.style.cursor = "col-resize";
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", up);
+            handle.addEventListener("pointercancel", up);
+          }}
+        >
+          <span className="h-full w-0.5 rounded-full bg-[rgb(35,131,226)] opacity-0 transition-opacity group-hover/th:opacity-40 hover:!opacity-100" />
+        </span>
+      ) : null}
     </th>
   );
+}
+
+type ColumnKey = "name" | "author" | "status" | "reviewer" | "assignee" | "labels" | "project" | "updated" | "id";
+
+const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
+  name: 340,
+  author: 170,
+  status: 112,
+  reviewer: 170,
+  assignee: 170,
+  labels: 200,
+  project: 150,
+  updated: 96,
+  id: 76,
+};
+
+/** Column widths the person dragged, remembered per table. */
+function useColumnWidths(table: string) {
+  const key = `gitlab-ui:column-widths:${table}`;
+  const [widths, setWidths] = useState<Record<ColumnKey, number>>(() => {
+    try {
+      return { ...DEFAULT_COLUMN_WIDTHS, ...(JSON.parse(readStored(key) ?? "{}") as Partial<Record<ColumnKey, number>>) };
+    } catch {
+      return DEFAULT_COLUMN_WIDTHS;
+    }
+  });
+  const save = (next: Record<ColumnKey, number>) => {
+    setWidths(next);
+    writeStored(key, JSON.stringify(next));
+  };
+  const resize = (column: ColumnKey) => ({
+    width: widths[column],
+    onWidth: (width: number) =>
+      setWidths((prev) => {
+        const next = { ...prev, [column]: Math.round(Math.min(900, Math.max(column === "name" ? 160 : 60, width))) };
+        writeStored(key, JSON.stringify(next));
+        return next;
+      }),
+    onReset: () => save({ ...widths, [column]: DEFAULT_COLUMN_WIDTHS[column] }),
+  });
+  return { widths, resize };
 }
 
 function RowMenu({ item }: { item: Item }) {
@@ -1786,8 +1867,19 @@ function ItemsTable({
   const noun = kind === "mr" ? "merge requests" : "issues";
   const columns = 7 + (showProject ? 1 : 0) + (kind === "mr" ? 1 : 0);
   // The name keeps its width; everything else scrolls sideways under it.
-  const minWidth =
-    NAME_WIDTH + 170 + 112 + (kind === "mr" ? 170 : 0) + 170 + 200 + (showProject ? 150 : 0) + 96 + 76;
+  const { widths, resize } = useColumnWidths(kind);
+  const visible: ColumnKey[] = [
+    "name",
+    "author",
+    "status",
+    ...(kind === "mr" ? (["reviewer"] as const) : []),
+    "assignee",
+    "labels",
+    ...(showProject ? (["project"] as const) : []),
+    "updated",
+    "id",
+  ];
+  const tableWidth = visible.reduce((sum, column) => sum + widths[column], 0);
 
   let rows: React.ReactNode;
   if (error !== null) {
@@ -1831,35 +1923,29 @@ function ItemsTable({
   return (
     <div className="overflow-x-auto">
       <table
-        className="w-full table-fixed border-collapse text-sm"
-        style={{ minWidth }}
+        className="table-fixed border-collapse text-sm"
+        style={{ width: tableWidth }}
       >
         <colgroup>
-          <col style={{ width: NAME_WIDTH }} />
-          <col className="w-[170px]" />
-          <col className="w-[112px]" />
-          {kind === "mr" ? <col className="w-[170px]" /> : null}
-          <col className="w-[170px]" />
-          <col className="w-[200px]" />
-          {showProject ? <col className="w-[150px]" /> : null}
-          <col className="w-[96px]" />
-          <col className="w-[76px]" />
+          {visible.map((column) => (
+            <col key={column} style={{ width: widths[column] }} />
+          ))}
         </colgroup>
         <thead>
           <tr className="border-b border-border/70">
-            <HeaderCell icon={ICONS.title} className={STICKY_CELL}>Name</HeaderCell>
-            <HeaderCell icon={ICONS.user}>Author</HeaderCell>
-            <HeaderCell icon={ICONS.status}>Status</HeaderCell>
+            <HeaderCell icon={ICONS.title} className={STICKY_CELL} resize={resize("name")}>Name</HeaderCell>
+            <HeaderCell icon={ICONS.user} resize={resize("author")}>Author</HeaderCell>
+            <HeaderCell icon={ICONS.status} resize={resize("status")}>Status</HeaderCell>
             {kind === "mr" ? (
-              <HeaderCell icon={ICONS.users}>Reviewer</HeaderCell>
+              <HeaderCell icon={ICONS.users} resize={resize("reviewer")}>Reviewer</HeaderCell>
             ) : null}
-            <HeaderCell icon={ICONS.users}>Assignee</HeaderCell>
-            <HeaderCell icon={ICONS.list}>Labels</HeaderCell>
+            <HeaderCell icon={ICONS.users} resize={resize("assignee")}>Assignee</HeaderCell>
+            <HeaderCell icon={ICONS.list} resize={resize("labels")}>Labels</HeaderCell>
             {showProject ? (
-              <HeaderCell icon={ICONS.folder}>Project</HeaderCell>
+              <HeaderCell icon={ICONS.folder} resize={resize("project")}>Project</HeaderCell>
             ) : null}
-            <HeaderCell icon={ICONS.clock}>Updated</HeaderCell>
-            <HeaderCell icon={ICONS.hash}>ID</HeaderCell>
+            <HeaderCell icon={ICONS.clock} resize={resize("updated")}>Updated</HeaderCell>
+            <HeaderCell icon={ICONS.hash} resize={resize("id")}>ID</HeaderCell>
           </tr>
         </thead>
         <tbody>
