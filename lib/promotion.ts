@@ -72,7 +72,7 @@ export function classifyPromotion(input: {
     const base = { sha: commit.sha, title: commit.title };
     const branches = input.branchesBySha.get(commit.sha);
     if (branches?.includes(input.target)) {
-      return { ...base, status: "promoted", basis: "sha", targetSha: commit.sha, note: `SHA есть в истории ${input.target}` };
+      return { ...base, status: "promoted", basis: "sha", targetSha: commit.sha, note: `SHA is on ${input.target}` };
     }
     const picked = findPick(commit.sha);
     if (picked !== null) {
@@ -81,7 +81,7 @@ export function classifyPromotion(input: {
         status: "promoted",
         basis: "cherry-pick",
         targetSha: picked,
-        note: `В ${input.target} есть ${picked.slice(0, 8)} с меткой cherry-pick -x`,
+        note: `${picked.slice(0, 8)} on ${input.target} is a cherry-pick -x of it`,
       };
     }
     const patch = input.samePatch?.get(commit.sha);
@@ -91,11 +91,11 @@ export function classifyPromotion(input: {
         status: "promoted",
         basis: "patch",
         targetSha: patch,
-        note: `В ${input.target} есть ${patch.slice(0, 8)} с тем же диффом`,
+        note: `${patch.slice(0, 8)} on ${input.target} has the same diff`,
       };
     }
     if (commit.parentCount > 1) {
-      return { ...base, status: "unknown", basis: null, targetSha: null, note: "Merge-коммит: переносится вместе с родителями, отдельно не проверяется" };
+      return { ...base, status: "unknown", basis: null, targetSha: null, note: "Merge commit: it moves with its parents, not on its own" };
     }
     const lookalike = input.lookalike?.get(commit.sha);
     if (lookalike !== undefined) {
@@ -104,16 +104,16 @@ export function classifyPromotion(input: {
         status: "unknown",
         basis: null,
         targetSha: lookalike,
-        note: `В ${input.target} есть ${lookalike.slice(0, 8)} с тем же заголовком, но другим диффом: проверьте вручную`,
+        note: `${lookalike.slice(0, 8)} on ${input.target} has the same title but a different diff: check it by hand`,
       };
     }
     if (branches === null || branches === undefined) {
-      return { ...base, status: "unknown", basis: null, targetSha: null, note: "GitLab не ответил, в каких ветках этот коммит" };
+      return { ...base, status: "unknown", basis: null, targetSha: null, note: "GitLab did not say which branches this commit is on" };
     }
     if (!input.targetHistoryComplete) {
-      return { ...base, status: "unknown", basis: null, targetSha: null, note: `Не найден в прочитанной части ${input.target}` };
+      return { ...base, status: "unknown", basis: null, targetSha: null, note: `Not found in the part of ${input.target} that was read` };
     }
-    return { ...base, status: "missing", basis: null, targetSha: null, note: `Совпадений в ${input.target} нет` };
+    return { ...base, status: "missing", basis: null, targetSha: null, note: `No match on ${input.target}` };
   });
 }
 

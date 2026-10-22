@@ -1899,8 +1899,9 @@ function ItemsTable({
 }
 
 /**
- * One-click views over the same filter grammar: "my reviews" means reviewer
- * or assignee on someone else's merge request, since teams use both.
+ * Saved views over the same filter grammar, drawn like a Notion database's
+ * view tabs. "Review requests" means reviewer or assignee on someone else's
+ * merge request, since teams use both fields for it.
  */
 function QuickViews({
   kind,
@@ -1914,41 +1915,43 @@ function QuickViews({
   const views =
     kind === "mr"
       ? [
-          { key: "review", label: "👀 Мне на ревью" },
-          { key: "author", label: "✍️ Мои" },
+          { key: "review", label: "Review requests", emoji: "👀" },
+          { key: "author", label: "Mine", emoji: "✍️" },
         ]
       : [
-          { key: "assignee", label: "🙋 На мне" },
-          { key: "author", label: "✍️ Мои" },
+          { key: "assignee", label: "Assigned to me", emoji: "🙋" },
+          { key: "author", label: "Mine", emoji: "✍️" },
         ];
-  const active = (key: string) =>
-    queryTokens(query).some((token) => token.key === key && token.value.toLowerCase() === "@me");
-  const exclusive = (key: string) =>
-    withoutQualifiers(query, (k, v) => views.some((view) => view.key === k) && v.toLowerCase() === "@me" && k !== key);
+  const isMe = (value: string) => value.toLowerCase() === "@me";
+  const current =
+    views.find((view) => queryTokens(query).some((t) => t.key === view.key && isMe(t.value)))?.key ?? "";
+  const select = (key: string) => {
+    const cleared = withoutQualifiers(query, (k, v) => views.some((view) => view.key === k) && isMe(v));
+    onQuery(key === "" ? cleared : withQualifier(cleared, key, "@me"));
+  };
+  const tabs = [{ key: "", label: "All", emoji: "" }, ...views];
   return (
-    <div className="flex flex-wrap items-center gap-1 pb-2">
-      {views.map((view) => {
-        const on = active(view.key);
+    <div role="tablist" aria-label="Views" className="mb-2 flex items-center gap-0.5 shadow-[inset_0_-1px_0_var(--border)]">
+      {tabs.map((tab) => {
+        const on = current === tab.key;
         return (
           <button
-            key={view.key}
+            key={tab.key || "all"}
             type="button"
-            aria-pressed={on}
-            onClick={() =>
-              onQuery(
-                on
-                  ? withoutQualifiers(query, (k, v) => k === view.key && v.toLowerCase() === "@me")
-                  : withQualifier(exclusive(view.key), view.key, "@me"),
-              )
-            }
+            role="tab"
+            aria-selected={on}
+            onClick={() => select(tab.key)}
             className={cn(
-              "inline-flex h-7 items-center rounded-md px-2 text-sm transition-colors",
+              "relative inline-flex h-8 items-center px-1.5 text-sm transition-colors after:absolute after:inset-x-1.5 after:bottom-0 after:h-0.5",
               on
-                ? "bg-[rgba(35,131,226,.12)] font-medium text-[rgb(35,131,226)]"
-                : "text-muted-foreground hover:bg-state-hover hover:text-foreground",
+                ? "font-medium text-foreground after:bg-foreground"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
-            {view.label}
+            <span className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-state-hover">
+              {tab.emoji !== "" ? <span aria-hidden="true">{tab.emoji}</span> : null}
+              {tab.label}
+            </span>
           </button>
         );
       })}
@@ -4547,9 +4550,9 @@ function usePromotion(project: string, iid: number, headSha: string) {
 type PromotionState = ReturnType<typeof usePromotion>;
 
 const PROMOTION_LABEL: Record<PromotionCommitView["status"], { text: string; className: string }> = {
-  promoted: { text: "✅ Перенесён", className: "bg-[rgb(219,237,219)] text-[rgb(28,56,41)] [.dark_&]:bg-[rgb(36,61,48)] [.dark_&]:text-[rgb(108,194,140)]" },
-  missing: { text: "⭕ Не перенесён", className: "bg-[rgb(253,236,200)] text-[rgb(64,44,27)] [.dark_&]:bg-[rgb(86,67,40)] [.dark_&]:text-[rgb(230,190,110)]" },
-  unknown: { text: "❓ Не проверено", className: "bg-foreground/[0.06] text-foreground/80" },
+  promoted: { text: "✅ Picked", className: "bg-[rgb(219,237,219)] text-[rgb(28,56,41)] [.dark_&]:bg-[rgb(36,61,48)] [.dark_&]:text-[rgb(108,194,140)]" },
+  missing: { text: "⭕ Not picked", className: "bg-[rgb(253,236,200)] text-[rgb(64,44,27)] [.dark_&]:bg-[rgb(86,67,40)] [.dark_&]:text-[rgb(230,190,110)]" },
+  unknown: { text: "❓ Unclear", className: "bg-foreground/[0.06] text-foreground/80" },
 };
 
 /** The fifth readiness tile: how much of the merge request is on the target. */
@@ -4559,11 +4562,11 @@ function PromotionCell({ promo, onClick }: { promo: PromotionState; onClick: () 
   const promoted = commits.filter((c) => c.status === "promoted").length;
   const missing = commits.filter((c) => c.status === "missing").length;
   let value: string;
-  if (promo.error !== null && data === null) value = "❓ Ошибка";
-  else if (data === null) value = "⏳ Проверяю…";
-  else if (!data.targetExists) value = "— Ветки нет";
-  else if (commits.length === 0) value = "— Нет коммитов";
-  else value = `${promoted === commits.length ? "✅" : missing > 0 ? "🟡" : "❓"} ${promoted} из ${commits.length}`;
+  if (promo.error !== null && data === null) value = "❓ Error";
+  else if (data === null) value = "⏳ Checking…";
+  else if (!data.targetExists) value = "— No such branch";
+  else if (commits.length === 0) value = "— No commits";
+  else value = `${promoted === commits.length ? "✅" : missing > 0 ? "🟡" : "❓"} ${promoted} of ${commits.length}`;
   return (
     <button
       type="button"
@@ -4576,7 +4579,7 @@ function PromotionCell({ promo, onClick }: { promo: PromotionState; onClick: () 
           : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
       )}
     >
-      <span className="truncate text-xs text-muted-foreground">Перенесено в {promo.target}</span>
+      <span className="truncate text-xs text-muted-foreground">Cherry-picked to {promo.target}</span>
       <span className="truncate font-semibold text-foreground">{value}</span>
     </button>
   );
@@ -4614,9 +4617,9 @@ function BranchTargetPicker({
           </svg>
         </button>
       </DropdownMenuTrigger>
-      <SearchableMenuContent title="Ветки" placeholder="Найти ветку…">
+      <SearchableMenuContent title="Branches" placeholder="Find a branch…">
         {(query) => {
-          if (branches === null) return <div className="px-3 py-2 text-sm text-muted-foreground">Загружаю…</div>;
+          if (branches === null) return <div className="px-3 py-2 text-sm text-muted-foreground">Loading…</div>;
           const shown = branches.filter((name) => matchesQuery(name, query));
           if (shown.length === 0) return <NoMatches query={query} />;
           return shown.map((name) => (
@@ -4636,7 +4639,7 @@ function CopySha({ sha }: { sha: string }) {
   return (
     <button
       type="button"
-      title="Скопировать SHA"
+      title="Copy SHA"
       className="relative -ml-[3px] mr-1 rounded-[3px] px-[3px] font-mono text-[12px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
       onClick={(event) => {
         event.stopPropagation();
@@ -4645,14 +4648,14 @@ function CopySha({ sha }: { sha: string }) {
             setCopied(true);
             setTimeout(() => setCopied(false), 1200);
           },
-          () => toast.error("Не удалось скопировать"),
+          () => toast.error("Could not copy"),
         );
       }}
     >
       {sha.slice(0, 8)}
       {copied ? (
         <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-[rgb(15,15,15)] px-[7px] py-[5px] font-sans text-[12px] font-medium leading-none text-white">
-          Скопировано
+          Copied
         </span>
       ) : null}
     </button>
@@ -4720,9 +4723,9 @@ function CommitsTab({
       <div className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground">
         {selected.size > 0 ? (
           <>
-            <span className="font-medium text-[rgb(35,131,226)]">Выбрано {selected.size}</span>
+            <span className="font-medium text-[rgb(35,131,226)]">{selected.size} selected</span>
             <button type="button" className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setSelected(new Set())}>
-              Снять выбор
+              Clear
             </button>
             <span className="flex-1" />
             <button
@@ -4731,19 +4734,19 @@ function CommitsTab({
               className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[rgb(35,131,226)] px-3 text-sm font-medium text-white transition-colors hover:bg-[rgb(0,117,211)] disabled:opacity-40"
               onClick={() => setConfirm(ordered(selected))}
             >
-              🍒 Cherry-pick в {promo.target}…
+              🍒 Cherry-pick to {promo.target}…
             </button>
           </>
         ) : (
           <>
-            <span>Перенос в</span>
+            <span>Cherry-picks to</span>
             <BranchTargetPicker project={project} value={promo.target} onChange={promo.setTarget} />
             <span>
               ·{" "}
               {promo.loading
-                ? "проверяю…"
+                ? "checking…"
                 : data !== null
-                  ? `проверено ${relativeTime(data.checkedAt)}`
+                  ? `checked ${relativeTime(data.checkedAt)}`
                   : ""}
             </span>
             <span className="flex-1" />
@@ -4756,7 +4759,7 @@ function CommitsTab({
                   setSelected(new Set(missing.map((c) => c.sha)));
                 }}
               >
-                Выбрать непереносённые ({missing.length})
+                Select not picked ({missing.length})
               </button>
             ) : null}
           </>
@@ -4771,7 +4774,7 @@ function CommitsTab({
         </div>
       ) : !data.targetExists ? (
         <p className="py-3 text-sm text-muted-foreground">
-          Ветки <span className="font-mono">{data.target}</span> нет в этом проекте. Выберите другую.
+          There is no <span className="font-mono">{data.target}</span> branch in this project. Pick another one.
         </p>
       ) : (
         <div className={cn("group/list shadow-[inset_0_1px_0_var(--border)]", selected.size > 0 && "selecting")}>
@@ -4786,7 +4789,7 @@ function CommitsTab({
                   {commit.status !== "promoted" ? (
                     <input
                       type="checkbox"
-                      aria-label={`Выбрать ${commit.sha.slice(0, 8)}`}
+                      aria-label={`Select ${commit.sha.slice(0, 8)}`}
                       checked={selected.has(commit.sha)}
                       onChange={(event) => toggle(commit.sha, event.target.checked)}
                       className={cn(
@@ -4810,11 +4813,11 @@ function CommitsTab({
                   <span className="pointer-events-none absolute right-[140px] top-1/2 flex -translate-y-1/2 gap-0.5 rounded-md bg-background p-0.5 opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
                     {commit.status === "unknown" ? (
                       <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={promo.reload}>
-                        🔄 Проверить
+                        🔄 Recheck
                       </button>
                     ) : null}
                     <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setConfirm([commit.sha])}>
-                      {commit.status === "unknown" ? "Перенести" : "🍒 Cherry-pick"}
+                      {commit.status === "unknown" ? "Pick anyway" : "🍒 Cherry-pick"}
                     </button>
                   </span>
                 ) : null}
@@ -4822,12 +4825,12 @@ function CommitsTab({
             );
           })}
           {!data.complete ? (
-            <p className="pt-2 text-xs text-muted-foreground">Показаны первые 500 коммитов.</p>
+            <p className="pt-2 text-xs text-muted-foreground">Showing the first 500 commits.</p>
           ) : null}
         </div>
       )}
       <p className="pt-2.5 text-xs text-muted-foreground">
-        Перенесён — коммит есть в выбранной ветке: по SHA, по метке <span className="font-mono">cherry-pick -x</span> или с тем же диффом. Заголовок сам по себе не считается доказательством.
+        Picked means the commit is on the branch: by SHA, by a <span className="font-mono">cherry-pick -x</span> line, or by an identical diff. A matching title alone is not evidence.
       </p>
 
       <Dialog open={confirm !== null} onOpenChange={(open) => !open && !starting && setConfirm(null)}>
@@ -4837,11 +4840,11 @@ function CommitsTab({
         }}>
           <DialogHeader>
             <DialogTitle>
-              Перенести {confirm?.length ?? 0} {confirm?.length === 1 ? "коммит" : "коммита"} в {promo.target}?
+              Cherry-pick {confirm?.length ?? 0} commit{confirm?.length === 1 ? "" : "s"} to {promo.target}?
             </DialogTitle>
             <DialogDescription>
-              Агент создаст ветку от <span className="font-mono">{promo.target}</span>, выполнит{" "}
-              <span className="font-mono">cherry-pick -x</span> по порядку и откроет MR. При конфликте остановится и спросит.
+              An agent branches off <span className="font-mono">{promo.target}</span>, runs{" "}
+              <span className="font-mono">cherry-pick -x</span> in order and opens a merge request. It stops and asks on a conflict.
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-52 overflow-auto rounded-md py-1 shadow-[inset_0_0_0_1px_var(--border)]">
@@ -4856,10 +4859,10 @@ function CommitsTab({
           </div>
           <DialogFooter>
             <Button variant="outline" data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
-              Отмена
+              Cancel
             </Button>
             <Button disabled={starting} onClick={() => confirm !== null && start(confirm)}>
-              {starting ? "Запускаю…" : "Запустить"}
+              {starting ? "Starting…" : "Start"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -4882,9 +4885,9 @@ function MergeButton({
 }) {
   const allowance = mergeAllowance(mr);
   const reasons: Array<{ emoji: string; title: string; hint: string; tab: MrTab }> = [];
-  if (readiness.pipeline.tone === "bad") reasons.push({ emoji: "❌", title: "Пайплайн упал", hint: "Открыть пайплайн", tab: "pipeline" });
-  if (readiness.conflicts.tone === "bad") reasons.push({ emoji: "⚠️", title: "Есть конфликты", hint: `Нужен rebase на ${mr.targetBranch}`, tab: "changes" });
-  if (readiness.discussions.tone === "wait") reasons.push({ emoji: "💬", title: readiness.discussions.label, hint: "Ответьте или закройте треды", tab: "discussion" });
+  if (readiness.pipeline.tone === "bad") reasons.push({ emoji: "❌", title: "Pipeline failed", hint: "Open the pipeline", tab: "pipeline" });
+  if (readiness.conflicts.tone === "bad") reasons.push({ emoji: "⚠️", title: "Merge conflicts", hint: `Rebase onto ${mr.targetBranch}`, tab: "changes" });
+  if (readiness.discussions.tone === "wait") reasons.push({ emoji: "💬", title: readiness.discussions.label, hint: "Reply to or resolve them", tab: "discussion" });
   const red = reasons.length > 0;
   return (
     <span className="group/merge relative inline-flex">
@@ -4905,7 +4908,7 @@ function MergeButton({
           role="tooltip"
           className="invisible absolute bottom-[calc(100%+8px)] right-0 z-20 w-[300px] rounded-lg bg-popover py-2 text-popover-foreground opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity after:absolute after:inset-x-0 after:-bottom-2.5 after:h-2.5 group-focus-within/merge:visible group-focus-within/merge:opacity-100 group-hover/merge:visible group-hover/merge:opacity-100"
         >
-          <div className="px-3.5 pb-1.5 text-xs font-medium text-muted-foreground">Почему нельзя влить</div>
+          <div className="px-3.5 pb-1.5 text-xs font-medium text-muted-foreground">Why it cannot merge yet</div>
           {reasons.map((reason) => (
             <button
               key={reason.title}
