@@ -3083,15 +3083,11 @@ function PipelineDetailView({
                 </Tag>
               </button>
             ) : (
-              <Tag className="font-mono text-[13px]" title={pipeline.ref}>
-                {pipeline.ref}
-              </Tag>
+              <CopyText value={pipeline.ref} />
             )}
           </PropertyRow>
           <PropertyRow icon={ICONS.hash} label="Commit">
-            <span className="font-mono text-[13px]" title={pipeline.sha}>
-              {shortSha(pipeline.sha)}
-            </span>
+            <CopyText value={pipeline.sha} variant="plain">{shortSha(pipeline.sha)}</CopyText>
           </PropertyRow>
           <PropertyRow icon={ICONS.bolt} label="Source">
             {pipeline.source.replace(/_/g, " ") || <EmptyValue />}
@@ -3358,18 +3354,19 @@ function PipelinesView({
                       <PipelineStatus status={entry.status} />
                     </td>
                     <td className={CELL}>
-                      <Tag
-                        className="max-w-full font-mono text-[13px]"
-                        title={entry.ref}
-                      >
-                        {mrIid !== null ? `!${mrIid}` : entry.ref}
-                      </Tag>
+                      {mrIid !== null ? (
+                        <Tag className="max-w-full font-mono text-[13px]" title={entry.ref}>
+                          !{mrIid}
+                        </Tag>
+                      ) : (
+                        <CopyText value={entry.ref} />
+                      )}
                     </td>
                     <td className={cn(CELL, "truncate text-muted-foreground")}>
                       {entry.source.replace(/_/g, " ")}
                     </td>
-                    <td className={cn(CELL, "font-mono text-[13px]")} title={entry.sha}>
-                      {shortSha(entry.sha)}
+                    <td className={cn(CELL, "font-mono text-[13px]")}>
+                      <CopyText value={entry.sha} variant="plain">{shortSha(entry.sha)}</CopyText>
                     </td>
                     <td
                       className={cn(CELL, "whitespace-nowrap")}
@@ -3656,12 +3653,7 @@ function BranchesView({
                   <tr key={branch.name} className="group border-b border-border/70">
                     <td className={CELL}>
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span
-                          className="min-w-0 truncate font-mono text-[13px] font-medium text-foreground"
-                          title={branch.name}
-                        >
-                          {branch.name}
-                        </span>
+                        <CopyText value={branch.name} variant="plain" className="font-medium text-foreground" />
                         {branch.isDefault ? <Tag>default</Tag> : null}
                         {branch.protected && !branch.isDefault ? <Tag>protected</Tag> : null}
                         {branch.merged && !branch.isDefault ? <Tag>merged</Tag> : null}
@@ -4561,11 +4553,11 @@ function MergeDialog({
         </DialogHeader>
         <div className="flex flex-col gap-3 text-sm">
           <p className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
-            <Tag className="font-mono text-[13px]">{mr.sourceBranch}</Tag>
+            <CopyText value={mr.sourceBranch} />
             <span>→</span>
-            <Tag className="font-mono text-[13px]">{mr.targetBranch}</Tag>
+            <CopyText value={mr.targetBranch} />
             <span>at commit</span>
-            <span className="font-mono text-[13px] text-foreground">{mr.headSha.slice(0, 8)}</span>
+            <CopyText value={mr.headSha} variant="plain" className="text-foreground">{mr.headSha.slice(0, 8)}</CopyText>
           </p>
           {needsAcknowledgement ? (
             <Callout icon="⚠️" className="py-3">
@@ -4767,31 +4759,84 @@ function BranchTargetPicker({
   );
 }
 
-function CopySha({ sha }: { sha: string }) {
+/** The async clipboard API, else the old selection copy (sandboxed frames). */
+async function copyToClipboard(value: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    const field = document.createElement("textarea");
+    field.value = value;
+    field.setAttribute("readonly", "");
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.appendChild(field);
+    field.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    field.remove();
+    return ok;
+  }
+}
+
+/**
+ * A branch, ref or SHA that copies itself on click and says so. `tag` draws it
+ * like the gray inline-code tags; `plain` keeps the surrounding text style.
+ */
+function CopyText({
+  value,
+  children,
+  variant = "tag",
+  className,
+}: {
+  value: string;
+  children?: React.ReactNode;
+  variant?: "tag" | "plain";
+  className?: string;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
-      title="Copy SHA"
-      className="relative -ml-[3px] mr-1 rounded-[3px] px-[3px] font-mono text-[12px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+      title={`${value} · click to copy`}
+      className={cn(
+        "relative inline-flex min-w-0 max-w-full items-center whitespace-nowrap font-mono text-[13px] transition-colors",
+        variant === "tag"
+          ? "h-5 rounded bg-foreground/[0.06] px-1.5 text-foreground/90 hover:bg-foreground/[0.11]"
+          : "-mx-[3px] rounded-[3px] px-[3px] hover:bg-state-hover hover:text-foreground",
+        className,
+      )}
       onClick={(event) => {
         event.stopPropagation();
-        navigator.clipboard.writeText(sha).then(
-          () => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          },
-          () => toast.error("Could not copy"),
-        );
+        copyToClipboard(value).then((ok) => {
+          if (!ok) {
+            toast.error("Could not copy");
+            return;
+          }
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        });
       }}
     >
-      {sha.slice(0, 8)}
+      <span className="truncate">{children ?? value}</span>
       {copied ? (
-        <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-[rgb(15,15,15)] px-[7px] py-[5px] font-sans text-[12px] font-medium leading-none text-white">
+        <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded bg-[rgb(15,15,15)] px-[7px] py-[5px] font-sans text-[12px] font-medium leading-none text-white">
           Copied
         </span>
       ) : null}
     </button>
+  );
+}
+
+function CopySha({ sha }: { sha: string }) {
+  return (
+    <CopyText value={sha} variant="plain" className="mr-1 text-[12px] text-muted-foreground">
+      {sha.slice(0, 8)}
+    </CopyText>
   );
 }
 
@@ -5301,9 +5346,9 @@ function MergeRequestDetailView({
           <StateStatus state={mr.state} draft={mr.draft} />
           <Person username={mr.author} />
           <span>wants to merge</span>
-          <Tag className="font-mono text-[13px]" title={mr.sourceBranch}>{mr.sourceBranch}</Tag>
+          <CopyText value={mr.sourceBranch} />
           <span>into</span>
-          <Tag className="font-mono text-[13px]" title={mr.targetBranch}>{mr.targetBranch}</Tag>
+          <CopyText value={mr.targetBranch} />
           <span aria-hidden="true">·</span>
           <span title={formatDateTime(mr.updatedAt)}>updated {relativeTime(mr.updatedAt)}</span>
         </div>
