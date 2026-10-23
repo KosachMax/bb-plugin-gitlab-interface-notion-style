@@ -4637,21 +4637,30 @@ function usePromotion(project: string, iid: number, headSha: string) {
   const [data, setData] = useState<PromotionView | null>(() => cachedRead<PromotionView>(cacheKey));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Only the newest request may update the view or end the spinner; an older
+  // one (a branch switch, the head SHA arriving) is ignored when it lands.
+  const latest = useRef(0);
   const load = useCallback(() => {
-    if (target === "") return;
+    if (target === "" || headSha === "") return;
+    const id = ++latest.current;
     setLoading(true);
     rpc
       .call("getMergeRequestPromotion", { project, iid, target })
       .then(
         (result) => {
+          if (id !== latest.current) return;
           cachedWrite(cacheKey, result);
           setData(result);
           setError(null);
         },
-        (err: unknown) => setError(errorText(err)),
+        (err: unknown) => {
+          if (id === latest.current) setError(errorText(err));
+        },
       )
-      .finally(() => setLoading(false));
-  }, [rpc, project, iid, target, cacheKey]);
+      .finally(() => {
+        if (id === latest.current) setLoading(false);
+      });
+  }, [rpc, project, iid, target, cacheKey, headSha]);
   useEffect(() => {
     setData(cachedRead<PromotionView>(cacheKey));
     load();
