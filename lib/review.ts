@@ -39,6 +39,8 @@ export function reviewVerdict(input: {
   author: string;
   approvedBy: readonly string[];
   reactions: readonly Reaction[];
+  /** Off: only 👎 counts (as "changes requested"); 👍 is not an approval. */
+  reactionApprovals?: boolean;
 }): ReviewVerdict {
   const author = input.author.toLowerCase();
   const approvers = new Map<string, Reviewer>();
@@ -53,7 +55,7 @@ export function reviewVerdict(input: {
     for (const username of reaction.users) {
       const key = username.toLowerCase();
       if (key === author) continue;
-      if (positive && !approvers.has(key)) {
+      if (positive && input.reactionApprovals !== false && !approvers.has(key)) {
         approvers.set(key, { username, via: "reaction" });
       }
       if (negative) rejectors.set(key, username);

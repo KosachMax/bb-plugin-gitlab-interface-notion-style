@@ -26,6 +26,14 @@ Screenshots use invented demo data.
   (pipeline, approvals, discussions, merge status), the failing job's log tail
   on the page, tabs for Changes, Pipeline, and Discussion, and a rail where
   reviewers (with Approved/Pending), assignees, and labels are editable.
+- **Cherry-pick tracking.** A Commits tab lists the merge request's commits
+  and whether each is already on a branch you choose (for example `stage-1`):
+  by SHA, by a `cherry-pick -x` line, or by an identical diff. Same title with
+  a different diff is flagged for a manual look. Select the missing ones and an
+  agent cherry-picks them with `-x` onto a new branch and opens a merge request.
+- **Views and wide tables.** "Review requests" and "Mine" views on merge
+  requests, a pinned Name column, an Author column, and column widths you can
+  drag (double-click a column edge to reset).
 - **Merge from the panel.** A Merge button on every open merge request, with a
   confirmation that shows the exact branches and commit, options for squash,
   deleting the branch, and "merge when the pipeline succeeds". Anything not
@@ -61,6 +69,18 @@ Screenshots use invented demo data.
   clear every value on GitLab; they no longer do.
 
 Not here yet: ahead/behind counts and a dedicated page per branch.
+
+## Settings
+
+Open BB → Settings → Plugins → GitLab Interface (Notion style).
+
+| Setting | Default | What it does |
+|---|---|---|
+| Cherry-pick tracking branch | empty (off) | Branch checked on every merge request, e.g. `stage-1`. Anyone can still pick another branch on the Commits tab. |
+| Assignees count as reviewers | off | For teams that request reviews through the assignee field; affects the "Review requests" view. |
+| Count 👍 as approval | off | A thumbs-up from someone other than the author counts as an approval in the review summary. |
+| Allow merging from the panel | on | Shows the Merge button. GitLab still enforces its own merge rules. |
+| Extra projects / Default GitLab host / Default BB project | | See "Which projects are tracked". |
 
 ## Install
 

@@ -121,6 +121,8 @@ export function matchesItemQuery(
   item: QueryableItem,
   query: ParsedItemQuery,
   viewer: string | null,
+  /** Teams that request reviews through the assignee field. */
+  options: { assigneesReview?: boolean } = {},
 ): boolean {
   if (query.states.length > 0 && !query.states.includes(item.state)) {
     return false;
@@ -150,7 +152,7 @@ export function matchesItemQuery(
     // Teams put people on a review as reviewer or as assignee; either counts,
     // but never on their own merge request.
     const wanted = resolveLogins(query.review, viewer);
-    const involved = [...item.assignees, ...(item.reviewers ?? [])].map((login) =>
+    const involved = [...(options.assigneesReview === true ? item.assignees : []), ...(item.reviewers ?? [])].map((login) =>
       login.toLowerCase(),
     );
     if (
@@ -191,7 +193,7 @@ export const QUALIFIER_KEYS: { key: string; hint: string }[] = [
   { key: "assignee:", hint: "assigned user, or @me" },
   { key: "reviewer:", hint: "review requested from, or @me" },
   { key: "author:", hint: "opened by" },
-  { key: "review:", hint: "reviewer or assignee on someone else's MR, or @me" },
+  { key: "review:", hint: "review requested on someone else's MR, or @me" },
   { key: "label:", hint: "has label" },
   { key: "project:", hint: "in project" },
   { key: "no:", hint: "missing — assignee, reviewer, label" },

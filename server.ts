@@ -286,6 +286,18 @@ export const gitlabRpcContract = defineRpcContract({
       .strict(),
     output: z.object({ items: z.array(itemSchema) }).strict(),
   },
+  /** The settings the panel reads. */
+  uiSettings: {
+    input: z.null(),
+    output: z
+      .object({
+        promotionBranch: z.string(),
+        assigneesReview: z.boolean(),
+        reactionApprovals: z.boolean(),
+        allowMerge: z.boolean(),
+      })
+      .strict(),
+  },
   viewer: {
     input: z.null(),
     output: z.object({ username: z.string().min(1) }).strict(),
@@ -1565,6 +1577,32 @@ export default async function plugin(bb: BbPluginApi) {
       description:
         "Host used for extra projects written without one, e.g. gitlab.com.",
       default: "gitlab.com",
+    },
+    promotionBranch: {
+      type: "string",
+      label: "Cherry-pick tracking branch",
+      description:
+        "Branch whose cherry-picks are tracked on merge requests, e.g. stage-1. Empty turns the check off. Each person can still pick another branch on the Commits tab.",
+      default: "",
+    },
+    assigneesReview: {
+      type: "boolean",
+      label: "Assignees count as reviewers",
+      description:
+        'For teams that request reviews through the assignee field: "Review requests" then includes merge requests where you are assignee.',
+      default: false,
+    },
+    reactionApprovals: {
+      type: "boolean",
+      label: "Count 👍 as approval",
+      description: "Treat a thumbs-up reaction from someone other than the author as an approval in the review summary.",
+      default: false,
+    },
+    allowMerge: {
+      type: "boolean",
+      label: "Allow merging from the panel",
+      description: "Show the Merge button on merge request pages. GitLab still enforces its own merge rules.",
+      default: true,
     },
     defaultProject: {
       type: "project",
@@ -2927,6 +2965,9 @@ export default async function plugin(bb: BbPluginApi) {
       removeSourceBranch,
       whenPipelineSucceeds,
     }): Promise<{ ok: true; state: string; scheduled: boolean }> {
+      if (!(await settings.get()).allowMerge) {
+        throw new Error("Merging from the panel is turned off in the plugin settings");
+      }
       const base = `${projectApiBase(project)}/merge_requests/${iid}`;
       const current = gitlabMergeRequestRowSchema.parse(
         await gitlabApi(project, base),
@@ -3036,6 +3077,16 @@ export default async function plugin(bb: BbPluginApi) {
         // creation succeeded; the next scheduled sync will pick it up
       }
       return { iid: created.iid, url: created.web_url };
+    },
+
+    async uiSettings() {
+      const current = await settings.get();
+      return {
+        promotionBranch: current.promotionBranch.trim(),
+        assigneesReview: current.assigneesReview,
+        reactionApprovals: current.reactionApprovals,
+        allowMerge: current.allowMerge,
+      };
     },
 
     /** { project, iid } → spawn a worker thread on an issue. */

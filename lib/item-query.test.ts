@@ -254,10 +254,13 @@ describe("review qualifier", () => {
   const q = parseItemQuery("review:@me");
   it("matches when I am reviewer or assignee on someone else's MR", () => {
     expect(matchesItemQuery(mr({ reviewers: ["me"] }), q, "me")).toBe(true);
-    expect(matchesItemQuery(mr({ assignees: ["Me"] }), q, "me")).toBe(true);
+    expect(matchesItemQuery(mr({ assignees: ["Me"] }), q, "me", { assigneesReview: true })).toBe(true);
+  });
+  it("ignores the assignee field unless the team uses it for reviews", () => {
+    expect(matchesItemQuery(mr({ assignees: ["me"] }), q, "me")).toBe(false);
   });
   it("skips my own merge requests and ones I am not on", () => {
-    expect(matchesItemQuery(mr({ author: "me", assignees: ["me"] }), q, "me")).toBe(false);
+    expect(matchesItemQuery(mr({ author: "me", assignees: ["me"] }), q, "me", { assigneesReview: true })).toBe(false);
     expect(matchesItemQuery(mr({ reviewers: ["bob"] }), q, "me")).toBe(false);
   });
 });

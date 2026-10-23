@@ -554,6 +554,38 @@ function useSpawn(): {
   return { spawn, spawningKey };
 }
 
+/** Plugin settings the panel reads, cached at module level — one fetch per load. */
+interface UiSettings {
+  promotionBranch: string;
+  assigneesReview: boolean;
+  reactionApprovals: boolean;
+  allowMerge: boolean;
+}
+let uiSettings: UiSettings = {
+  promotionBranch: "",
+  assigneesReview: false,
+  reactionApprovals: false,
+  allowMerge: true,
+};
+let uiSettingsLoaded = false;
+
+function useUiSettings(): UiSettings {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const [value, setValue] = useState<UiSettings>(uiSettings);
+  useEffect(() => {
+    if (uiSettingsLoaded) return;
+    rpc.call("uiSettings").then(
+      (result) => {
+        uiSettings = result;
+        uiSettingsLoaded = true;
+        setValue(result);
+      },
+      () => {},
+    );
+  }, [rpc]);
+  return value;
+}
+
 /** The glab viewer's username, cached at module level — one fetch per load. */
 let viewerUsername: string | null = null;
 
@@ -2064,13 +2096,14 @@ function DatabaseView({
   // Loads GitLab's label colors (and warms the filter menus) for every project.
   useDirectory(projects.map((entry) => entry.project), { people: false });
   const viewer = useViewer();
+  const { assigneesReview } = useUiSettings();
   const parsed = useMemo(() => parseItemQuery(query), [query]);
   const filtered = useMemo(
     () =>
       items === null
         ? null
-        : items.filter((item) => matchesItemQuery(item, parsed, viewer)),
-    [items, parsed, viewer],
+        : items.filter((item) => matchesItemQuery(item, parsed, viewer, { assigneesReview })),
+    [items, parsed, viewer, assigneesReview],
   );
   const hasQualifiers = queryTokens(query).some((token) => token.key !== "");
   // The funnel shows and hides the pill row; it starts shown when filtering.
@@ -4170,6 +4203,7 @@ function readinessOf(mr: MergeRequestDetail): Readiness {
     author: mr.author,
     approvedBy: mr.approvedBy,
     reactions: mr.reactions,
+    reactionApprovals: uiSettings.reactionApprovals,
   });
   const missing = mr.approvalsLeft;
   const ruleOpen = mr.approvalsRequired > 0 && missing > 0;
@@ -4348,6 +4382,7 @@ function ReviewLine({ mr }: { mr: MergeRequestDetail }) {
     author: mr.author,
     approvedBy: mr.approvedBy,
     reactions: mr.reactions,
+    reactionApprovals: uiSettings.reactionApprovals,
   });
   const answered = new Set(
     [...verdict.approvers.map((entry) => entry.username), ...verdict.rejectors].map(
@@ -4593,19 +4628,22 @@ interface PromotionView {
   commits: PromotionCommitView[];
 }
 
-const DEFAULT_PROMOTION_TARGET = "stage-1";
 
 function usePromotion(project: string, iid: number, headSha: string) {
   const rpc = useRpc<typeof gitlabRpcContract>();
+  const { promotionBranch } = useUiSettings();
   const targetKey = `gitlab-ui:promotion-target:${project}`;
-  const [target, setTargetState] = useState(
-    () => readStored(targetKey) ?? DEFAULT_PROMOTION_TARGET,
-  );
+  const [picked, setPicked] = useState(() => readStored(targetKey));
+  // A branch picked on the Commits tab wins; otherwise the settings default.
+  // Empty means nobody asked for the check, so nothing is fetched.
+  const target = picked ?? promotionBranch;
+  const setTargetState = setPicked;
   const cacheKey = `promotion:${project}!${iid}:${target}:${headSha}`;
   const [data, setData] = useState<PromotionView | null>(() => cachedRead<PromotionView>(cacheKey));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
+    if (target === "") return;
     setLoading(true);
     rpc
       .call("getMergeRequestPromotion", { project, iid, target })
@@ -4640,6 +4678,15 @@ const PROMOTION_LABEL: Record<PromotionCommitView["status"], { text: string; cla
   missing: { text: "⭕ Not picked", className: "bg-[rgb(253,236,200)] text-[rgb(64,44,27)] [.dark_&]:bg-[rgb(86,67,40)] [.dark_&]:text-[rgb(230,190,110)]" },
   unknown: { text: "❓ Unclear", className: "bg-foreground/[0.06] text-foreground/80" },
 };
+
+function Spinner() {
+  return (
+    <svg className="size-3.5 animate-spin motion-reduce:animate-none" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity=".25" strokeWidth="2" />
+      <path d="M14 8a6 6 0 0 0-6-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 /** The fifth readiness tile: how much of the merge request is on the target. */
 function PromotionCell({ promo, onClick }: { promo: PromotionState; onClick: () => void }) {
@@ -4826,11 +4873,11 @@ function CommitsTab({
         ) : (
           <>
             <span>Cherry-picks to</span>
-            <BranchTargetPicker project={project} value={promo.target} onChange={promo.setTarget} />
+            <BranchTargetPicker project={project} value={promo.target === "" ? "choose a branch" : promo.target} onChange={promo.setTarget} />
             <span>
               ·{" "}
               {promo.loading
-                ? "checking…"
+                ? (<span className="inline-flex items-center gap-1.5"><Spinner />checking…</span>)
                 : data !== null
                   ? `checked ${relativeTime(data.checkedAt)}`
                   : ""}
@@ -4852,7 +4899,11 @@ function CommitsTab({
         )}
       </div>
 
-      {promo.error !== null && data === null ? (
+      {promo.target === "" ? (
+        <p className="py-3 text-sm text-muted-foreground">
+          Pick a branch above to see which of these commits were cherry-picked to it. A default can be set in the plugin settings.
+        </p>
+      ) : promo.error !== null && data === null ? (
         <Callout icon="⚠️">{promo.error}</Callout>
       ) : data === null ? (
         <div className="flex flex-col gap-2 py-2">
@@ -4863,7 +4914,14 @@ function CommitsTab({
           There is no <span className="font-mono">{data.target}</span> branch in this project. Pick another one.
         </p>
       ) : (
-        <div className={cn("group/list shadow-[inset_0_1px_0_var(--border)]", selected.size > 0 && "selecting")}>
+        <div
+          aria-busy={promo.loading}
+          className={cn(
+            "group/list shadow-[inset_0_1px_0_var(--border)] transition-opacity",
+            selected.size > 0 && "selecting",
+            promo.loading && "opacity-60",
+          )}
+        >
           {commits.map((commit) => {
             const label = PROMOTION_LABEL[commit.status];
             return (
@@ -4898,8 +4956,15 @@ function CommitsTab({
                 {commit.status !== "promoted" ? (
                   <span className="pointer-events-none absolute right-[140px] top-1/2 flex -translate-y-1/2 gap-0.5 rounded-md bg-background p-0.5 opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
                     {commit.status === "unknown" ? (
-                      <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={promo.reload}>
-                        🔄 Recheck
+                      <button
+                        type="button"
+                        disabled={promo.loading}
+                        aria-busy={promo.loading}
+                        className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:cursor-default disabled:hover:bg-transparent"
+                        onClick={promo.reload}
+                      >
+                        {promo.loading ? <Spinner /> : <span aria-hidden="true">🔄</span>}
+                        {promo.loading ? "Checking…" : "Recheck"}
                       </button>
                     ) : null}
                     <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setConfirm([commit.sha])}>
@@ -5160,6 +5225,7 @@ function MergeRequestDetailView({
     author: mr.author,
     approvedBy: mr.approvedBy,
     reactions: mr.reactions,
+    reactionApprovals: uiSettings.reactionApprovals,
   });
   const approvedVia = new Map(
     verdict.approvers.map((entry) => [entry.username.toLowerCase(), entry.via] as const),
@@ -5244,12 +5310,14 @@ function MergeRequestDetailView({
           <span title={formatDateTime(mr.updatedAt)}>updated {relativeTime(mr.updatedAt)}</span>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 pb-2 @[640px]:grid-cols-5">
+        <div className={cn("grid grid-cols-2 gap-2 pb-2", promo.target !== "" ? "@[640px]:grid-cols-5" : "@[640px]:grid-cols-4")}>
           <ReadinessCell {...readiness.review} onClick={() => setTab("overview")} />
           <ReadinessCell {...readiness.pipeline} onClick={() => setTab("pipeline")} />
           <ReadinessCell {...readiness.discussions} onClick={() => setTab("discussion")} />
           <ReadinessCell {...readiness.conflicts} onClick={() => setTab("changes")} />
-          <PromotionCell promo={promo} onClick={() => setTab("commits")} />
+          {promo.target !== "" ? (
+            <PromotionCell promo={promo} onClick={() => setTab("commits")} />
+          ) : null}
         </div>
         <ReviewLine mr={mr} />
         <div className="flex flex-wrap items-center gap-2 pb-4 pt-0">
@@ -5286,12 +5354,12 @@ function MergeRequestDetailView({
                 Merge scheduled: waiting for the pipeline
               </span>
             ) : (
-              <MergeButton
+              uiSettings.allowMerge ? <MergeButton
                 mr={mr}
                 readiness={readiness}
                 onMerge={() => setMergeOpen(true)}
                 onShow={setTab}
-              />
+              /> : null
             )
           ) : null}
         </div>

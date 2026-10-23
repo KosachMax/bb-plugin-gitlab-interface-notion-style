@@ -52,3 +52,15 @@ describe("review verdict", () => {
     expect(emojiFor("some_custom_one")).toBe(":some_custom_one:");
   });
 });
+
+describe("reaction approvals setting", () => {
+  it("does not count a thumbs-up as approval when turned off", () => {
+    const verdict = reviewVerdict({
+      author: "ann",
+      approvedBy: [],
+      reactions: [{ name: "thumbsup", users: ["bob"] }],
+      reactionApprovals: false,
+    });
+    expect(verdict.state).toBe("pending");
+  });
+});
