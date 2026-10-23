@@ -5239,10 +5239,8 @@ function MergeRequestDetailView({
       ...(promo.data !== null && promo.data.commits.length > 0
         ? {
             badge: {
-              text: (() => {
-                const left = promo.data.commits.filter((c) => c.status === "missing").length;
-                return left > 0 ? `⭕ ${left}` : String(promo.data.commits.length);
-              })(),
+              // The tab counts commits; how many are cherry-picked lives on the tile.
+              text: String(promo.data.commits.length),
               bad: false,
             },
           }
