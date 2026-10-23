@@ -54,7 +54,7 @@ const MAX_PATCH_BYTES = 20_000;
 
 const GLAB_HINT =
   "Install the GitLab CLI (https://gitlab.com/gitlab-org/cli) and run " +
-  "`glab auth login`, then `bb plugin reload gitlab`.";
+  "`glab auth login`, then `bb plugin reload gitlab-interface-notion-style`.";
 
 /**
  * "host/group/sub/project" — the host glab knows the instance by, then a path
@@ -496,11 +496,22 @@ export const gitlabRpcContract = defineRpcContract({
               basis: z.enum(["sha", "cherry-pick", "patch"]).nullable(),
               targetSha: z.string().nullable(),
               note: z.string(),
+              /** The commit message after the title line; often the only TL;DR there is. */
+              body: z.string(),
+              author: z.string(),
+              createdAt: z.string(),
             })
             .strict(),
         ),
       })
       .strict(),
+  },
+  /** Start an agent thread that reviews and explains specific commits of a merge request. */
+  startCommitReview: {
+    input: itemInputSchema
+      .extend({ shas: z.array(z.string().regex(/^[0-9a-f]{7,40}$/i)).min(1).max(100) })
+      .strict(),
+    output: z.object({ threadId: z.string().min(1) }).strict(),
   },
   /** Start an agent thread that cherry-picks commits onto a branch via a new MR. */
   startCherryPick: {
@@ -2803,6 +2814,7 @@ export default async function plugin(bb: BbPluginApi) {
           message: z.string().default(""),
           parent_ids: z.array(z.string()).default([]),
           created_at: z.string().default(""),
+          author_name: z.string().default(""),
         })
         .passthrough();
       const mrCommits: z.infer<typeof commitRow>[] = [];
@@ -2916,7 +2928,52 @@ export default async function plugin(bb: BbPluginApi) {
         targetCommits,
         targetHistoryComplete,
       });
-      return { target, targetExists: true, checkedAt, complete, commits };
+      const bySha = new Map(mrCommits.map((entry) => [entry.id, entry]));
+      return {
+        target,
+        targetExists: true,
+        checkedAt,
+        complete,
+        commits: commits.map((commit) => {
+          const row = bySha.get(commit.sha);
+          const message = row?.message ?? "";
+          const firstBreak = message.indexOf("\n");
+          return {
+            ...commit,
+            body: firstBreak < 0 ? "" : message.slice(firstBreak + 1).trim(),
+            author: row?.author_name ?? "",
+            createdAt: row?.created_at ?? "",
+          };
+        }),
+      };
+    },
+
+    /** { project, iid, shas } → a thread that explains and reviews those commits. */
+    async startCommitReview({ project, iid, shas }) {
+      const item = getCachedItem("mr", project, iid);
+      const title = item?.title ?? `merge request !${iid}`;
+      const ref = `${project}!${iid}`;
+      const prompt = [
+        `Review ${shas.length === 1 ? "a commit" : `${shas.length} commits`} of GitLab merge request ${ref} ("${title}").`,
+        "",
+        ...shas.map((sha) => `  ${sha}`),
+        "",
+        "For each commit:",
+        "1. Read it: `git fetch origin && git show --stat <sha>`, then the diff where it matters.",
+        "2. Give a TL;DR in two or three sentences: what changes and why.",
+        "3. List risks: behaviour changes, missing tests, migrations, anything that would break if this commit were cherry-picked alone.",
+        "",
+        `Context: glab mr view ${iid} -R ${project}`,
+        "Do not push, comment on GitLab or change branches unless asked.",
+      ].join("\n");
+      const thread = await bb.sdk.threads.spawn({
+        projectId: await resolveBbProjectId(project),
+        environment: { type: "project-default" },
+        title: `Review ${shas.length === 1 ? shas[0].slice(0, 8) : `${shas.length} commits`} of !${iid}`.slice(0, 120),
+        prompt,
+      });
+      await addLink({ kind: "mr", project, iid, threadId: thread.id, createdAt: new Date().toISOString() });
+      return { threadId: thread.id };
     },
 
     /** { project, iid, target, shas } → a thread that cherry-picks them via a new MR. */

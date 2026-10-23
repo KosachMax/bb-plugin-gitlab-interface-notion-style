@@ -4610,6 +4610,9 @@ interface PromotionCommitView {
   basis: "sha" | "cherry-pick" | "patch" | null;
   targetSha: string | null;
   note: string;
+  body: string;
+  author: string;
+  createdAt: string;
 }
 
 interface PromotionView {
@@ -4734,7 +4737,7 @@ function BranchTargetPicker({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="inline-flex h-6 items-center gap-1 rounded px-1.5 font-mono text-[13px] text-foreground transition-colors hover:bg-state-hover data-[state=open]:bg-state-hover"
+          className="inline-flex h-7 items-center gap-1 rounded-full bg-[rgba(35,131,226,.08)] px-2.5 font-mono text-[13px] text-[rgb(35,131,226)] transition-colors hover:bg-[rgba(35,131,226,.14)] data-[state=open]:bg-[rgba(35,131,226,.14)]"
         >
           {value}
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -4852,15 +4855,18 @@ function CommitsTab({
   const rpc = useRpc<typeof gitlabRpcContract>();
   const navigate = useBbNavigate();
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<Set<string>>(new Set());
   // A button that appears under the pointer is not clickable for a moment, so
   // a double click on "select" cannot start a cherry-pick.
   const [armedAt, setArmedAt] = useState(0);
   const [, forceTick] = useState(0);
   const [confirm, setConfirm] = useState<string[] | null>(null);
   const [starting, setStarting] = useState(false);
+  const [asking, setAsking] = useState<string | null>(null);
   const data = promo.data;
   const commits = data?.commits ?? [];
   const missing = commits.filter((c) => c.status === "missing");
+  const picked = commits.filter((c) => c.status === "promoted").length;
   useEffect(() => setSelected(new Set()), [promo.target]);
   const armed = Date.now() - armedAt >= 600;
   useEffect(() => {
@@ -4869,16 +4875,22 @@ function CommitsTab({
     return () => clearTimeout(timer);
   }, [armed, armedAt]);
 
-  const toggle = (sha: string, on: boolean) => {
-    if (selected.size === 0) setArmedAt(Date.now());
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(sha);
-      else next.delete(sha);
-      return next;
-    });
+  const toggleIn = (set: Set<string>, sha: string, on: boolean) => {
+    const next = new Set(set);
+    if (on) next.add(sha);
+    else next.delete(sha);
+    return next;
   };
-  const start = (shas: string[]) => {
+  const select = (sha: string, on: boolean) => {
+    if (selected.size === 0) setArmedAt(Date.now());
+    setSelected((prev) => toggleIn(prev, sha, on));
+  };
+  // Keep the merge request's order (oldest first) whatever was clicked first.
+  const ordered = (shas: Iterable<string>) => {
+    const set = new Set(shas);
+    return commits.filter((c) => set.has(c.sha)).map((c) => c.sha);
+  };
+  const startPick = (shas: string[]) => {
     setStarting(true);
     rpc
       .call("startCherryPick", { project, iid, target: promo.target, shas })
@@ -4890,58 +4902,53 @@ function CommitsTab({
       .catch((err: unknown) => toast.error(errorText(err)))
       .finally(() => setStarting(false));
   };
-  // Keep the merge request's order (oldest first) whatever was clicked first.
-  const ordered = (shas: Iterable<string>) => {
-    const set = new Set(shas);
-    return commits.filter((c) => set.has(c.sha)).map((c) => c.sha);
+  const askAgent = (shas: string[]) => {
+    setAsking(shas.join(","));
+    rpc
+      .call("startCommitReview", { project, iid, shas: ordered(shas) })
+      .then((result) => navigate.toThread(result.threadId))
+      .catch((err: unknown) => toast.error(errorText(err)))
+      .finally(() => setAsking(null));
   };
+
+  const hoverButton =
+    "inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50";
 
   return (
     <div className="flex flex-col">
       <div className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground">
-        {selected.size > 0 ? (
-          <>
-            <span className="font-medium text-[rgb(35,131,226)]">{selected.size} selected</span>
-            <button type="button" className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setSelected(new Set())}>
-              Clear
-            </button>
-            <span className="flex-1" />
-            <button
-              type="button"
-              disabled={!armed}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[rgb(35,131,226)] px-3 text-sm font-medium text-white transition-colors hover:bg-[rgb(0,117,211)] disabled:opacity-40"
-              onClick={() => setConfirm(ordered(selected))}
-            >
-              🍒 Cherry-pick to {promo.target}…
-            </button>
-          </>
-        ) : (
-          <>
-            <span>Cherry-picks to</span>
-            <BranchTargetPicker project={project} value={promo.target === "" ? "choose a branch" : promo.target} onChange={promo.setTarget} />
-            <span>
-              ·{" "}
-              {promo.loading
-                ? (<span className="inline-flex items-center gap-1.5"><Spinner />checking…</span>)
-                : data !== null
-                  ? `checked ${relativeTime(data.checkedAt)}`
-                  : ""}
-            </span>
-            <span className="flex-1" />
-            {missing.length > 0 ? (
-              <button
-                type="button"
-                className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground"
-                onClick={() => {
-                  setArmedAt(Date.now());
-                  setSelected(new Set(missing.map((c) => c.sha)));
-                }}
-              >
-                Select not picked ({missing.length})
-              </button>
-            ) : null}
-          </>
-        )}
+        <span>Target:</span>
+        <BranchTargetPicker
+          project={project}
+          value={promo.target === "" ? "choose a branch" : promo.target}
+          onChange={promo.setTarget}
+        />
+        {data !== null && data.targetExists && commits.length > 0 ? (
+          <span>
+            {picked} of {commits.length} picked
+          </span>
+        ) : null}
+        {promo.loading ? (
+          <span className="inline-flex items-center gap-1.5">
+            <Spinner />
+            checking…
+          </span>
+        ) : data !== null ? (
+          <span title={formatDateTime(data.checkedAt)}>· checked {relativeTime(data.checkedAt)}</span>
+        ) : null}
+        <span className="flex-1" />
+        {missing.length > 0 && selected.size === 0 ? (
+          <button
+            type="button"
+            className="h-7 rounded px-2 transition-colors hover:bg-state-hover hover:text-foreground"
+            onClick={() => {
+              setArmedAt(Date.now());
+              setSelected(new Set(missing.map((c) => c.sha)));
+            }}
+          >
+            Select not picked ({missing.length})
+          </button>
+        ) : null}
       </div>
 
       {promo.target === "" ? (
@@ -4959,63 +4966,90 @@ function CommitsTab({
           There is no <span className="font-mono">{data.target}</span> branch in this project. Pick another one.
         </p>
       ) : (
-        <div
-          aria-busy={promo.loading}
-          className={cn(
-            "group/list shadow-[inset_0_1px_0_var(--border)] transition-opacity",
-            selected.size > 0 && "selecting",
-            promo.loading && "opacity-60",
-          )}
-        >
+        <div aria-busy={promo.loading} className={cn("flex flex-col transition-opacity", promo.loading && "opacity-60")}>
           {commits.map((commit) => {
             const label = PROMOTION_LABEL[commit.status];
+            const expanded = open.has(commit.sha);
+            const done = commit.status === "promoted";
             return (
-              <div
-                key={commit.sha}
-                className="group/row relative grid min-h-[52px] grid-cols-[28px_minmax(0,1fr)_132px] items-center py-1.5 pr-1 shadow-[inset_0_-1px_0_var(--border)] hover:bg-state-hover"
-              >
-                <span className="flex justify-center">
-                  {commit.status !== "promoted" ? (
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${commit.sha.slice(0, 8)}`}
-                      checked={selected.has(commit.sha)}
-                      onChange={(event) => toggle(commit.sha, event.target.checked)}
-                      className={cn(
-                        "size-3.5 cursor-pointer accent-[rgb(35,131,226)] transition-opacity focus-visible:opacity-100",
-                        selected.has(commit.sha) || selected.size > 0 ? "opacity-100" : "opacity-0 group-hover/row:opacity-100",
-                      )}
-                    />
-                  ) : null}
-                </span>
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-foreground">
-                    <CopySha sha={commit.sha} />
-                    {commit.title}
+              <div key={commit.sha}>
+                <div className="group/row flex items-start gap-2.5 rounded px-1.5 py-2 transition-colors hover:bg-state-hover">
+                  <span className="flex h-5 w-4 shrink-0 items-center justify-center">
+                    {!done ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${commit.sha.slice(0, 8)}`}
+                        checked={selected.has(commit.sha)}
+                        onChange={(event) => select(commit.sha, event.target.checked)}
+                        className={cn(
+                          "size-3.5 cursor-pointer accent-[rgb(35,131,226)] transition-opacity focus-visible:opacity-100",
+                          selected.size > 0 || selected.has(commit.sha) ? "opacity-100" : "opacity-0 group-hover/row:opacity-100",
+                        )}
+                      />
+                    ) : null}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className={cn("truncate text-sm font-semibold", done ? "text-muted-foreground" : "text-foreground")}>
+                      <CopySha sha={commit.sha} />
+                      {commit.title}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">{commit.note}</div>
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">{commit.note}</div>
-                </div>
-                <span className={cn("inline-flex h-5 items-center justify-self-start whitespace-nowrap rounded-[3px] px-1.5 text-[13px]", label.className)}>
-                  {label.text}
-                </span>
-                {commit.status !== "promoted" ? (
-                  <span className="pointer-events-none absolute right-[140px] top-1/2 flex -translate-y-1/2 gap-0.5 rounded-md bg-background p-0.5 opacity-0 shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)] transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
-                    {commit.status === "unknown" ? (
+                  <span className="flex shrink-0 items-center gap-0.5">
+                    <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within/row:opacity-100 group-hover/row:opacity-100">
+                      {!done ? (
+                        <button type="button" className={hoverButton} onClick={() => setConfirm([commit.sha])}>
+                          🍒 Cherry-pick
+                        </button>
+                      ) : null}
+                      {commit.status === "unknown" ? (
+                        <button type="button" disabled={promo.loading} className={hoverButton} onClick={promo.reload}>
+                          {promo.loading ? <Spinner /> : "🔄"} Recheck
+                        </button>
+                      ) : null}
                       <button
                         type="button"
-                        disabled={promo.loading}
-                        aria-busy={promo.loading}
-                        className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:cursor-default disabled:hover:bg-transparent"
-                        onClick={promo.reload}
+                        disabled={asking !== null}
+                        className={hoverButton}
+                        title="Explain and review this commit in a new agent thread"
+                        onClick={() => askAgent([commit.sha])}
                       >
-                        {promo.loading ? <Spinner /> : <span aria-hidden="true">🔄</span>}
-                        {promo.loading ? "Checking…" : "Recheck"}
+                        {asking === commit.sha ? <Spinner /> : "⚡"} Agent
                       </button>
-                    ) : null}
-                    <button type="button" className="h-7 whitespace-nowrap rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setConfirm([commit.sha])}>
-                      {commit.status === "unknown" ? "Pick anyway" : "🍒 Cherry-pick"}
+                    </span>
+                    <span className={cn("ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[13px]", label.className)}>
+                      {label.text}
+                    </span>
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      aria-label={expanded ? "Hide details" : "Show details"}
+                      className="ml-1 grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+                      onClick={() => setOpen((prev) => toggleIn(prev, commit.sha, !prev.has(commit.sha)))}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" className={cn("transition-transform", expanded && "rotate-90")}>
+                        <path d="M3.5 2l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                      </svg>
                     </button>
                   </span>
+                </div>
+                {expanded ? (
+                  <div className="mb-1 ml-8 mr-2 flex flex-col gap-2 pb-2 text-sm">
+                    <div className="text-xs text-muted-foreground">
+                      {commit.author}
+                      {commit.createdAt !== "" ? ` · ${relativeTime(commit.createdAt)}` : ""}
+                    </div>
+                    {commit.body !== "" ? (
+                      <div className="whitespace-pre-wrap break-words text-foreground/90">{commit.body}</div>
+                    ) : (
+                      <div className="text-muted-foreground">
+                        No description in the commit message.{" "}
+                        <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => askAgent([commit.sha])}>
+                          Ask an agent for a TL;DR
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ) : null}
               </div>
             );
@@ -5025,9 +5059,27 @@ function CommitsTab({
           ) : null}
         </div>
       )}
-      <p className="pt-2.5 text-xs text-muted-foreground">
-        Picked means the commit is on the branch: by SHA, by a <span className="font-mono">cherry-pick -x</span> line, or by an identical diff. A matching title alone is not evidence.
-      </p>
+
+      {selected.size > 0 ? (
+        <div className="sticky bottom-4 mt-4 flex items-center gap-2.5 rounded-lg bg-background py-2 pl-3.5 pr-2 text-sm shadow-[0_0_0_1px_rgba(15,15,15,.05),0_3px_6px_rgba(15,15,15,.1),0_9px_24px_rgba(15,15,15,.2)]">
+          <span className="font-medium text-[rgb(35,131,226)]">{selected.size} selected</span>
+          <button type="button" className="h-7 rounded px-2 text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground" onClick={() => setSelected(new Set())}>
+            Clear
+          </button>
+          <span className="flex-1" />
+          <button type="button" disabled={asking !== null} className={hoverButton} onClick={() => askAgent([...selected])}>
+            ⚡ Ask agent
+          </button>
+          <button
+            type="button"
+            disabled={!armed}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[rgb(35,131,226)] px-3 text-sm font-medium text-white transition-colors hover:bg-[rgb(0,117,211)] disabled:opacity-40"
+            onClick={() => setConfirm(ordered(selected))}
+          >
+            🍒 Cherry-pick to <span className="font-mono text-[13px]">{promo.target}</span>…
+          </button>
+        </div>
+      ) : null}
 
       <Dialog open={confirm !== null} onOpenChange={(open) => !open && !starting && setConfirm(null)}>
         <DialogContent className="max-w-md rounded-xl" onOpenAutoFocus={(event) => {
@@ -5057,7 +5109,7 @@ function CommitsTab({
             <Button variant="outline" data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
               Cancel
             </Button>
-            <Button disabled={starting} onClick={() => confirm !== null && start(confirm)}>
+            <Button disabled={starting} onClick={() => confirm !== null && startPick(confirm)}>
               {starting ? "Starting…" : "Start"}
             </Button>
           </DialogFooter>
@@ -5254,7 +5306,8 @@ function MergeRequestDetailView({
 
   const promo = usePromotion(project, iid, mrState?.headSha ?? "");
 
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  // A failed refresh keeps the page that was already loaded.
+  if (error !== null && mrState === null) return <Callout icon="⚠️">{error}</Callout>;
   if (mrState === null) return <PageSkeleton />;
 
   const mrLinks = links[linkKey("mr", project, iid)];
