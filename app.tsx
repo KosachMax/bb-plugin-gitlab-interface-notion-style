@@ -6726,7 +6726,7 @@ function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThread
 }
 
 function GitlabWorkflowSummary() {
-  return <span className="whitespace-nowrap text-sm text-muted-foreground">🦊 GitLab</span>;
+  return <Tag color="orange" className="h-6 px-2 font-medium">🦊 GitLab</Tag>;
 }
 
 function GitlabWorkflowAction({ threadId, projectId, environment }: ExperimentalThreadContextSegmentProps) {
@@ -6765,9 +6765,9 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [rpc, projectId, branch, localHead]);
 
-  if (error) return <span className="text-xs text-muted-foreground">GitLab недоступен</span>;
+  if (error) return <Tag color="red" className="text-xs">GitLab недоступен</Tag>;
   if (workspace === undefined || branch === null || remote?.branch !== branch || remote.project === null) {
-    return <span className="text-xs text-muted-foreground">Проверяю…</span>;
+    return <Tag color="gray" className="text-xs">Проверяю…</Tag>;
   }
   const stage = workflowStage({
     dirty: workspace.workingTree.hasUncommittedChanges,
@@ -6806,9 +6806,9 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     }
   };
   return (
-    <span className="flex items-center gap-2">
-      {remote.mergeRequestIid !== null && stage !== "open-mr" ? <span className="text-xs text-muted-foreground">MR !{remote.mergeRequestIid}</span> : null}
-      {stage === "idle" ? <span className="text-xs text-muted-foreground">Готово</span> : <Button size="sm" variant="outline" disabled={busy} onClick={onClick}>{labels[stage]}</Button>}
+    <span className="flex items-center gap-2 font-sans">
+      {remote.mergeRequestIid !== null && stage !== "open-mr" ? <Tag color="blue" className="text-xs">MR !{remote.mergeRequestIid}</Tag> : null}
+      {stage === "idle" ? <Tag color="green" className="text-xs">Готово</Tag> : <PrimaryButton className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500" disabled={busy} onClick={onClick}>{labels[stage]}</PrimaryButton>}
     </span>
   );
 }
@@ -6817,7 +6817,7 @@ export default definePluginApp((app) => {
   app.slots.experimental_threadContextSegment({
     id: "gitlab-workflow",
     title: "GitLab workflow",
-    group: "4_gitlab",
+    group: "0_gitlab",
     summary: GitlabWorkflowSummary,
     action: GitlabWorkflowAction,
     useVisible: useGitlabWorkflowVisible,
