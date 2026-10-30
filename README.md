@@ -80,6 +80,11 @@ Open BB → Settings → Plugins → GitLab Interface (Notion style).
 | Assignees count as reviewers | off | For teams that request reviews through the assignee field; affects the "Review requests" view. |
 | Count 👍 as approval | off | A thumbs-up from someone other than the author counts as an approval in the review summary. |
 | Allow merging from the panel | on | Shows the Merge button. GitLab still enforces its own merge rules. |
+| New-thread dashboard: layout | `counters` | `counters` (tiles over one list), `sections` (collapsible toggles) or `off`. |
+| New-thread dashboard: groups and order | `action,ready,review,waiting` | Any of `action`, `ready`, `review`, `waiting`, `drafts`, `issues`, in display order. |
+| New-thread dashboard: rows per group | `8` | 3, 5, 8, 12 or 20. |
+| New-thread dashboard: hide empty groups | off | Drop groups with nothing in them. |
+| New-thread dashboard: groups collapsed by default | `waiting` | Sections layout only. |
 | Extra projects / Default GitLab host / Default BB project | | See "Which projects are tracked". |
 
 ## Install

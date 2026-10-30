@@ -561,20 +561,29 @@ interface UiSettings {
   assigneesReview: boolean;
   reactionApprovals: boolean;
   allowMerge: boolean;
+  homeLayout: string;
+  homeGroups: string[];
+  homeRows: number;
+  homeHideEmpty: boolean;
+  homeCollapsed: string[];
 }
 let uiSettings: UiSettings = {
   promotionBranch: "",
   assigneesReview: false,
   reactionApprovals: false,
   allowMerge: true,
+  homeLayout: "counters",
+  homeGroups: ["action", "ready", "review", "waiting"],
+  homeRows: 8,
+  homeHideEmpty: false,
+  homeCollapsed: ["waiting"],
 };
 let uiSettingsLoaded = false;
 
 function useUiSettings(): UiSettings {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const [value, setValue] = useState<UiSettings>(uiSettings);
-  useEffect(() => {
-    if (uiSettingsLoaded) return;
+  const fetchSettings = useCallback(() => {
     rpc.call("uiSettings").then(
       (result) => {
         uiSettings = result;
@@ -584,6 +593,14 @@ function useUiSettings(): UiSettings {
       () => {},
     );
   }, [rpc]);
+  useEffect(() => {
+    if (uiSettingsLoaded) {
+      setValue(uiSettings);
+      return;
+    }
+    fetchSettings();
+  }, [fetchSettings]);
+  useRealtime("settings-changed", fetchSettings);
   return value;
 }
 
@@ -6234,13 +6251,14 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
 }
 
 // ---------------------------------------------------------------------------
-// New-thread dashboard: four counters (what needs you, what can merge, what
-// you should review, what waits on others) over one list of the chosen group.
+// New-thread dashboard. Layout, groups, order, rows and collapsed groups come
+// from the plugin settings: "counters" (tiles over one list) or "sections"
+// (Notion-style toggles).
 // ---------------------------------------------------------------------------
 
-type HomeGroup = "action" | "ready" | "review" | "waiting";
+type HomeGroup = "action" | "ready" | "review" | "waiting" | "drafts" | "issues";
 interface HomeItem {
-  group: HomeGroup;
+  group: "action" | "ready" | "review" | "waiting";
   project: string;
   iid: number;
   title: string;
@@ -6250,13 +6268,25 @@ interface HomeItem {
   updatedAt: string;
   url: string;
 }
+interface HomeRow {
+  kind: Kind;
+  project: string;
+  iid: number;
+  title: string;
+  author: string;
+  updatedAt: string;
+  reason: { text: string; tone: string } | null;
+  labels: string[];
+}
 
-const HOME_GROUPS: Array<{ id: HomeGroup; emoji: string; label: string; empty: string }> = [
-  { id: "action", emoji: "🔥", label: "Needs your action", empty: "Nothing is waiting on you." },
-  { id: "ready", emoji: "✅", label: "Ready to merge", empty: "None of your merge requests is ready yet." },
-  { id: "review", emoji: "👀", label: "Waiting for your review", empty: "No review requests." },
-  { id: "waiting", emoji: "⏳", label: "Waiting on others", empty: "No merge requests waiting on others." },
-];
+const HOME_GROUPS: Record<HomeGroup, { emoji: string; label: string; empty: string }> = {
+  action: { emoji: "🔥", label: "Needs your action", empty: "Nothing is waiting on you." },
+  ready: { emoji: "✅", label: "Ready to merge", empty: "None of your merge requests is ready yet." },
+  review: { emoji: "👀", label: "Waiting for your review", empty: "No review requests." },
+  waiting: { emoji: "⏳", label: "Waiting on others", empty: "No merge requests waiting on others." },
+  drafts: { emoji: "📝", label: "Your drafts", empty: "No draft merge requests." },
+  issues: { emoji: "🙋", label: "Issues assigned to you", empty: "No open issues assigned to you." },
+};
 
 const HOME_TONE: Record<string, string> = {
   bad: "bg-red-500/[0.12] text-red-700 [.dark_&]:text-red-300",
@@ -6270,16 +6300,21 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const navigate = useBbNavigate();
   const status = useStatus();
+  const settings = useUiSettings();
+  const viewer = useViewer();
   const { spawn, spawningKey } = useSpawn();
   const scoped =
     projectId === null
       ? null
       : (status?.projects.find((entry) => entry.bbProjectId === projectId)?.project ?? null);
+  const groups = settings.homeGroups.filter((id): id is HomeGroup => id in HOME_GROUPS);
+  const wantsMrs = groups.some((id) => id !== "issues");
   const cacheKey = `home-dashboard:${scoped ?? "all"}`;
   const [items, setItems] = useState<HomeItem[] | null>(() => cachedRead<HomeItem[]>(cacheKey));
   const [error, setError] = useState<string | null>(null);
-  // Until someone picks a tile, open the most urgent group that has anything.
-  const [picked, setGroup] = useSticky<HomeGroup | null>("home-group", null);
+  const issues = useItems({ kind: "issue", project: scoped, state: "open" });
+  const [picked, setPicked] = useSticky<HomeGroup | null>("home-group", null);
+  const [toggled, setToggled] = useSticky<Record<string, boolean>>("home-collapsed", {});
   const load = useCallback(() => {
     rpc.call("homeDashboard", { project: scoped }).then(
       (result) => {
@@ -6291,34 +6326,169 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
     );
   }, [rpc, scoped, cacheKey]);
   useEffect(() => {
-    if (status === null) return;
+    if (status === null || !wantsMrs || settings.homeLayout === "off") return;
     load();
-  }, [load, status === null]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [load, status === null, wantsMrs, settings.homeLayout]); // eslint-disable-line react-hooks/exhaustive-deps
   useRealtime("data-changed", load);
 
-  if (items === null) return error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />;
-  const count = (id: HomeGroup) => items.filter((item) => item.group === id).length;
-  const group: HomeGroup = picked ?? HOME_GROUPS.find((entry) => count(entry.id) > 0)?.id ?? "action";
-  const shown = items.filter((item) => item.group === group);
-  const current = HOME_GROUPS.find((entry) => entry.id === group) ?? HOME_GROUPS[0];
-  const open = (item: HomeItem) =>
-    navigate.toPluginPanel(PANEL_PATH, {
-      subPath: routeToSubPath({ view: "merge_request", project: item.project, iid: item.iid }),
-    });
+  if (settings.homeLayout === "off" || groups.length === 0) return null;
+  if (wantsMrs && items === null) return error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />;
 
+  // Rows per group, from the one MR answer and the cached issues.
+  const splitDrafts = groups.includes("drafts");
+  const rowsOf = (id: HomeGroup): HomeRow[] => {
+    if (id === "issues") {
+      const me = viewer?.toLowerCase();
+      return (issues.items ?? [])
+        .filter((item) => me !== undefined && item.assignees.some((login) => login.toLowerCase() === me))
+        .map((item) => ({ kind: "issue", project: item.project, iid: item.iid, title: item.title, author: item.author, updatedAt: item.updatedAt, reason: null, labels: item.labels }));
+    }
+    return (items ?? [])
+      .filter((item) =>
+        id === "drafts"
+          ? item.draft && item.group === "waiting"
+          : item.group === id && !(splitDrafts && id === "waiting" && item.draft),
+      )
+      .map((item) => ({ kind: "mr", project: item.project, iid: item.iid, title: item.title, author: item.author, updatedAt: item.updatedAt, reason: dashboardReason(item), labels: [] }));
+  };
+  const all = groups.map((id) => ({ id, rows: rowsOf(id) }));
+  const visible = settings.homeHideEmpty ? all.filter((entry) => entry.rows.length > 0) : all;
+  if (visible.length === 0) return <p className="px-2 py-3 text-sm text-muted-foreground">Nothing needs you in GitLab right now.</p>;
+  const limit = settings.homeRows;
+
+  const open = (row: HomeRow) =>
+    navigate.toPluginPanel(PANEL_PATH, {
+      subPath: routeToSubPath(
+        row.kind === "mr"
+          ? { view: "merge_request", project: row.project, iid: row.iid }
+          : { view: "issue", project: row.project, iid: row.iid },
+      ),
+    });
+  const list = (id: HomeGroup, rows: HomeRow[]) =>
+    rows.length === 0 ? (
+      <p className="px-2 py-2 text-sm text-muted-foreground">{HOME_GROUPS[id].empty}</p>
+    ) : (
+      <>
+        {rows.slice(0, limit).map((row) => {
+          const busy = spawningKey === linkKey(row.kind, row.project, row.iid);
+          return (
+            <div
+              key={`${row.kind}:${row.project}!${row.iid}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => open(row)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") open(row);
+              }}
+              className="group relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 outline-none transition-colors hover:bg-state-hover focus-visible:bg-state-hover"
+            >
+              <span className="shrink-0 text-[13px] text-muted-foreground">
+                {MARKER[row.kind]}
+                {row.iid}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm text-foreground" title={row.title}>
+                {row.title}
+              </span>
+              {row.reason !== null ? (
+                <span className={cn("hidden h-5 shrink-0 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[12.5px] sm:inline-flex", HOME_TONE[row.reason.tone])}>
+                  {row.reason.text}
+                </span>
+              ) : (
+                <span className="hidden shrink-0 items-center gap-1.5 sm:flex">
+                  <LabelTags labels={row.labels} max={2} />
+                </span>
+              )}
+              <Avatar username={row.author} size={18} />
+              <span className="w-9 shrink-0 text-right text-[12.5px] text-muted-foreground/70" title={formatDateTime(row.updatedAt)}>
+                {relativeTime(row.updatedAt).replace(" ago", "")}
+              </span>
+              <span className="absolute right-1.5 flex gap-0.5 rounded-md bg-background opacity-0 shadow-[0_0_0_1px_var(--border)] transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                <button
+                  type="button"
+                  className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    open(row);
+                  }}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  disabled={spawningKey !== null}
+                  className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50"
+                  title={row.kind === "mr" ? "Review with an agent" : "Send an agent to this issue"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    spawn(row.kind, row.project, row.iid);
+                  }}
+                >
+                  {busy ? "…" : "⚡ Agent"}
+                </button>
+              </span>
+            </div>
+          );
+        })}
+        {rows.length > limit ? (
+          <p className="px-2 pt-1 text-xs text-muted-foreground">and {rows.length - limit} more in the GitLab panel</p>
+        ) : null}
+      </>
+    );
+  const staleNote =
+    error !== null ? <p className="text-xs text-muted-foreground">⚠️ {error} · showing the last loaded list</p> : null;
+
+  if (settings.homeLayout === "sections") {
+    const collapsed = (id: HomeGroup) => toggled[id] ?? settings.homeCollapsed.includes(id);
+    return (
+      <div className="flex flex-col gap-0.5">
+        {staleNote}
+        {visible.map(({ id, rows }) => {
+          const closed = collapsed(id);
+          return (
+            <div key={id}>
+              <button
+                type="button"
+                aria-expanded={!closed}
+                onClick={() => setToggled((prev) => ({ ...prev, [id]: !closed }))}
+                className="flex h-8 w-full items-center gap-2 rounded-md px-1.5 text-left transition-colors hover:bg-state-hover"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" className={cn("shrink-0 text-muted-foreground transition-transform", closed && "-rotate-90")}>
+                  <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+                <span aria-hidden="true">{HOME_GROUPS[id].emoji}</span>
+                <span className="text-sm font-semibold text-foreground">{HOME_GROUPS[id].label}</span>
+                <span className="rounded-full bg-foreground/[0.07] px-1.5 text-xs text-muted-foreground">{rows.length}</span>
+              </button>
+              {closed ? null : <div className="pb-1 pl-[22px]">{list(id, rows)}</div>}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Counters: until someone picks a tile, the most urgent non-empty group.
+  const group = (picked !== null && visible.some((entry) => entry.id === picked) ? picked : null) ??
+    visible.find((entry) => entry.rows.length > 0)?.id ??
+    visible[0].id;
+  const current = visible.find((entry) => entry.id === group) ?? visible[0];
   return (
     <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label="Merge request groups">
-        {HOME_GROUPS.map((entry) => {
-          const n = count(entry.id);
-          const on = entry.id === group;
+      <div
+        className="grid gap-2"
+        style={{ gridTemplateColumns: `repeat(${visible.length <= 5 ? visible.length : 3}, minmax(0, 1fr))` }}
+        role="tablist"
+        aria-label="Groups"
+      >
+        {visible.map(({ id, rows }) => {
+          const on = id === group;
           return (
             <button
-              key={entry.id}
+              key={id}
               type="button"
               role="tab"
               aria-selected={on}
-              onClick={() => setGroup(entry.id)}
+              onClick={() => setPicked(id)}
               className={cn(
                 "flex min-w-0 flex-col items-start rounded-[10px] px-3 py-2.5 text-left transition-colors",
                 on
@@ -6327,77 +6497,17 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
               )}
             >
               <span className="w-full truncate text-[12.5px] text-muted-foreground">
-                {entry.emoji} {entry.label}
+                {HOME_GROUPS[id].emoji} {HOME_GROUPS[id].label}
               </span>
-              <span className={cn("text-2xl font-bold leading-tight", n === 0 ? "text-muted-foreground/60" : "text-foreground")}>
-                {n}
+              <span className={cn("text-2xl font-bold leading-tight", rows.length === 0 ? "text-muted-foreground/60" : "text-foreground")}>
+                {rows.length}
               </span>
             </button>
           );
         })}
       </div>
-      {error !== null ? <p className="text-xs text-muted-foreground">⚠️ {error} · showing the last loaded list</p> : null}
-      <div className="flex flex-col">
-        {shown.length === 0 ? (
-          <p className="px-2 py-3 text-sm text-muted-foreground">{current.empty}</p>
-        ) : (
-          shown.slice(0, 12).map((item) => {
-            const reason = dashboardReason(item);
-            const busy = spawningKey === linkKey("mr", item.project, item.iid);
-            return (
-              <div
-                key={`${item.project}!${item.iid}`}
-                role="button"
-                tabIndex={0}
-                onClick={() => open(item)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") open(item);
-                }}
-                className="group relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 outline-none transition-colors hover:bg-state-hover focus-visible:bg-state-hover"
-              >
-                <span className="shrink-0 text-[13px] text-muted-foreground">!{item.iid}</span>
-                <span className="min-w-0 flex-1 truncate text-sm text-foreground" title={item.title}>
-                  {item.title}
-                </span>
-                <span className={cn("hidden h-5 shrink-0 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[12.5px] sm:inline-flex", HOME_TONE[reason.tone])}>
-                  {reason.text}
-                </span>
-                <Avatar username={item.author} size={18} />
-                <span className="w-9 shrink-0 text-right text-[12.5px] text-muted-foreground/70" title={formatDateTime(item.updatedAt)}>
-                  {relativeTime(item.updatedAt).replace(" ago", "")}
-                </span>
-                <span className="absolute right-1.5 flex gap-0.5 rounded-md bg-background opacity-0 shadow-[0_0_0_1px_var(--border)] transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-                  <button
-                    type="button"
-                    className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      open(item);
-                    }}
-                  >
-                    Open
-                  </button>
-                  <button
-                    type="button"
-                    disabled={spawningKey !== null}
-                    className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50"
-                    title="Review with an agent"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      spawn("mr", item.project, item.iid);
-                    }}
-                  >
-                    {busy ? "…" : "⚡ Agent"}
-                  </button>
-                </span>
-              </div>
-            );
-          })
-        )}
-        {shown.length > 12 ? (
-          <p className="px-2 pt-1 text-xs text-muted-foreground">and {shown.length - 12} more in the GitLab panel</p>
-        ) : null}
-      </div>
+      {staleNote}
+      <div className="flex flex-col">{list(current.id, current.rows)}</div>
     </div>
   );
 }

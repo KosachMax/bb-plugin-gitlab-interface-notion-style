@@ -296,6 +296,11 @@ export const gitlabRpcContract = defineRpcContract({
         assigneesReview: z.boolean(),
         reactionApprovals: z.boolean(),
         allowMerge: z.boolean(),
+        homeLayout: z.string(),
+        homeGroups: z.array(z.string()),
+        homeRows: z.number().int(),
+        homeHideEmpty: z.boolean(),
+        homeCollapsed: z.array(z.string()),
       })
       .strict(),
   },
@@ -1597,6 +1602,14 @@ function run(
   return promise;
 }
 
+/** "a, b ,c" → ["a","b","c"], lower-cased, empty entries dropped. */
+function listSetting(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
+
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     extraProjects: {
@@ -1640,6 +1653,37 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Show the Merge button on merge request pages. GitLab still enforces its own merge rules.",
       default: true,
     },
+    homeLayout: {
+      type: "select",
+      label: "New-thread dashboard: layout",
+      description: "counters — tiles with counts over one list; sections — collapsible groups like Notion toggles; off — hide the dashboard.",
+      options: ["counters", "sections", "off"],
+      default: "counters",
+    },
+    homeGroups: {
+      type: "string",
+      label: "New-thread dashboard: groups and order",
+      description:
+        "Comma-separated, in display order. Available: action (your MRs that need you), ready (ready to merge), review (waiting for your review), waiting (your MRs waiting on others), drafts (your draft MRs, otherwise counted in waiting), issues (open issues assigned to you).",
+      default: "action,ready,review,waiting",
+    },
+    homeRows: {
+      type: "select",
+      label: "New-thread dashboard: rows per group",
+      options: ["3", "5", "8", "12", "20"],
+      default: "8",
+    },
+    homeHideEmpty: {
+      type: "boolean",
+      label: "New-thread dashboard: hide empty groups",
+      default: false,
+    },
+    homeCollapsed: {
+      type: "string",
+      label: "New-thread dashboard: groups collapsed by default",
+      description: "Sections layout only. Comma-separated group names, e.g. waiting,drafts.",
+      default: "waiting",
+    },
     defaultProject: {
       type: "project",
       label: "Default BB project",
@@ -1647,6 +1691,9 @@ export default async function plugin(bb: BbPluginApi) {
         "Where agent threads spawn for GitLab projects that are not attached to a BB project.",
     },
   });
+
+  // The panel re-reads its settings when they change, without a reload.
+  settings.onChange(() => bb.realtime.publish("settings-changed", {}));
 
   // ------------------------------------------------------------------
   // glab CLI plumbing. The server process may have a trimmed PATH, so probe
@@ -3234,6 +3281,11 @@ export default async function plugin(bb: BbPluginApi) {
         assigneesReview: current.assigneesReview,
         reactionApprovals: current.reactionApprovals,
         allowMerge: current.allowMerge,
+        homeLayout: current.homeLayout,
+        homeGroups: listSetting(current.homeGroups),
+        homeRows: Number(current.homeRows) || 8,
+        homeHideEmpty: current.homeHideEmpty,
+        homeCollapsed: listSetting(current.homeCollapsed),
       };
     },
 
