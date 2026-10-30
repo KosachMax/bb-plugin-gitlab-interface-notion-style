@@ -17,11 +17,11 @@ Screenshots use invented demo data.
 
 ## Features
 
-- **GitLab activity above the dashboard.** A 12-month heatmap shows daily
-  pushed-commit counts, total commits in push events, push events, and active
-  days for the signed-in GitLab account. It uses the authenticated Events API,
-  so the values describe pushes and can differ from GitLab's profile-wide
-  "contributions" total. Results are cached for 30 minutes.
+- **Your commits above the dashboard.** A Week / Month / Year switch shows how
+  many commits you authored, lines added and removed, and active days, over a
+  12-month heatmap. Only commits whose author is you count (on any branch of
+  the tracked projects, each SHA once, merge commits skipped), so a rebase
+  or a merge of other people's work does not inflate the numbers. Cached for 30 minutes.
 - **🦊 GitLab next action in a thread.** The context row checks local changes,
   the GitLab branch, and its open merge request. It suggests committing,
   preparing a push, creating an MR, or opening the existing MR. Commit and MR

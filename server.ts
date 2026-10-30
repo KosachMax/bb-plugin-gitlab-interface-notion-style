@@ -22,7 +22,7 @@ import {
 import { z } from "zod";
 import { explainMergeFailure, mergeAllowance, mergeQuery } from "./lib/merge";
 import { groupOwnMergeRequest } from "./lib/dashboard";
-import { aggregatePushEvents, type PushEvent } from "./lib/contributions";
+import { aggregateCommits, type AuthoredCommit } from "./lib/contributions";
 import { classifyPromotion, normalizedPatch, type PromotionCommit } from "./lib/promotion";
 import {
   classifyJobStatus,
@@ -631,9 +631,14 @@ export const gitlabRpcContract = defineRpcContract({
       startDate: z.string(),
       endDate: z.string(),
       totalCommits: z.number().int().nonnegative(),
-      pushEvents: z.number().int().nonnegative(),
+      projects: z.number().int().nonnegative(),
       complete: z.boolean(),
-      days: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() }).strict()),
+      days: z.array(z.object({
+        date: z.string(),
+        count: z.number().int().nonnegative(),
+        additions: z.number().int().nonnegative(),
+        deletions: z.number().int().nonnegative(),
+      }).strict()),
     }).strict(),
   },
   listLinks: {
@@ -2278,7 +2283,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const calendarCache = new Map<string, { at: number; value: Promise<{
     host: string; startDate: string; endDate: string; totalCommits: number;
-    pushEvents: number; complete: boolean; days: { date: string; count: number }[];
+    projects: number; complete: boolean; days: { date: string; count: number; additions: number; deletions: number }[];
   }> }>();
 
   async function contributionCalendar(host: string, timeZone: string) {
@@ -2295,31 +2300,38 @@ export default async function plugin(bb: BbPluginApi) {
     const cached = calendarCache.get(key);
     if (cached && now - cached.at < 30 * 60_000) return cached.value;
     const value = (async () => {
-      const { id } = await getViewerProfile(host);
-      const allEvents: PushEvent[] = [];
-      let complete = false;
-      // Include an extra day around the time-zone boundary. The displayed
-      // range is filtered below using the viewer's local calendar dates.
-      const after = new Date(now - 366 * 86_400_000).toISOString().slice(0, 10);
-      for (let page = 1; page <= 20; page += 1) {
-        const endpoint = `/users/${id}/events?action=pushed&after=${after}&per_page=100&page=${page}`;
-        const raw = JSON.parse(await glab(["api", "--hostname", host, endpoint], 30_000)) as unknown;
-        const events = z.array(z.looseObject({
-          action_name: z.string().catch(""),
-          created_at: z.string().catch(""),
-          push_data: z.looseObject({ commit_count: z.number().int().nonnegative().catch(0) }).nullish().catch(null),
-        })).parse(raw);
-        allEvents.push(...events);
-        if (events.length < 100) { complete = true; break; }
+      const { username } = await getViewerProfile(host);
+      const projects = (await discoverProjects()).filter((entry) => entry.host === host);
+      const since = new Date(now - 366 * 86_400_000).toISOString();
+      const commitRow = z.looseObject({
+        id: z.string(),
+        authored_date: z.string().catch(""),
+        parent_ids: z.array(z.string()).catch([]),
+        stats: z.looseObject({ additions: z.number().catch(0), deletions: z.number().catch(0) }).nullish().catch(null),
+      });
+      const commits: AuthoredCommit[] = [];
+      let complete = true;
+      // Only commits the viewer authored, on any branch; GitLab matches the
+      // author filter against name and e-mail, which carry the username here.
+      for (const entry of projects) {
+        for (let page = 1; ; page += 1) {
+          const rows = z.array(commitRow).catch([]).parse(
+            await gitlabApi(
+              entry.project,
+              `${projectApiBase(entry.project)}/repository/commits?all=true&with_stats=true&since=${encodeURIComponent(since)}&author=${encodeURIComponent(username)}&per_page=100&page=${page}`,
+            ).catch(() => []),
+          );
+          commits.push(...rows);
+          if (rows.length < 100) break;
+          if (page >= 20) { complete = false; break; }
+        }
       }
-      const { days, pushEvents } = aggregatePushEvents(
-        allEvents, startDate, endDate,
-        (timestamp) => dateFormat.format(new Date(timestamp)),
-      );
+      const days = aggregateCommits(commits, startDate, endDate, (timestamp) => dateFormat.format(new Date(timestamp)));
       return {
         host, startDate, endDate,
         totalCommits: days.reduce((sum, day) => sum + day.count, 0),
-        pushEvents, complete, days,
+        projects: projects.length,
+        complete, days,
       };
     })();
     calendarCache.set(key, { at: now, value });

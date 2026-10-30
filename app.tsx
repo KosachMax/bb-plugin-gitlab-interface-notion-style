@@ -6291,9 +6291,9 @@ interface ContributionCalendarData {
   startDate: string;
   endDate: string;
   totalCommits: number;
-  pushEvents: number;
+  projects: number;
   complete: boolean;
-  days: { date: string; count: number }[];
+  days: { date: string; count: number; additions: number; deletions: number }[];
 }
 
 const CONTRIBUTION_LEVELS = [
@@ -6336,14 +6336,14 @@ function ContributionGrid({ weeks, endDate }: {
     const monthStart = week.find((day) => day.inRange && day.date.endsWith("-01"))?.date;
     const month = monthStart?.slice(0, 7) ?? (index === 0 ? week.find((day) => day.inRange)?.date.slice(0, 7) : undefined);
     return month
-      ? new Date(`${month}-01T00:00:00Z`).toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" })
+      ? new Date(`${month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "short", timeZone: "UTC" })
       : "";
   });
 
   return (
     <div className="flex min-w-0 gap-2" aria-hidden="true">
       <div className="grid shrink-0 grid-rows-7 gap-[2px] pt-[22px] text-[10px] leading-none text-muted-foreground">
-        {["", "Пн", "", "Ср", "", "Пт", ""].map((day, index) => <span key={index} className="flex w-5 items-center">{day}</span>)}
+        {["", "Mon", "", "Wed", "", "Fri", ""].map((day, index) => <span key={index} className="flex w-6 items-center">{day}</span>)}
       </div>
       <div ref={gridRef} className="min-w-0 max-w-[800px] flex-1">
         <div className="mb-1.5 grid gap-[2px]" style={columns}>
@@ -6355,7 +6355,7 @@ function ContributionGrid({ weeks, endDate }: {
               {week.map((day) => (
                 <span
                   key={day.date}
-                  title={day.inRange ? `${day.date}: ${day.count} коммитов в пушах` : undefined}
+                  title={day.inRange ? `${day.date}: ${day.count} commit${day.count === 1 ? "" : "s"}` : undefined}
                   className={cn("aspect-square w-full rounded-[2px]", day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent", day.date === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background")}
                 />
               ))}
@@ -6384,9 +6384,9 @@ function ContributionCalendar({ host }: { host: string | null }) {
   if (host === null) return null;
   if (data === null) {
     return (
-      <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Активность GitLab">
-        <div className="mb-3 text-sm font-semibold text-foreground">Коммиты в GitLab</div>
-        {error ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Не удалось загрузить активность.</span><Button size="sm" variant="ghost" onClick={load}>Повторить</Button></div> : <Skeleton className="h-32 w-full" />}
+      <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Your GitLab commits">
+        <div className="mb-3 text-sm font-semibold text-foreground">Your commits</div>
+        {error ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Could not load your activity.</span><Button size="sm" variant="ghost" onClick={load}>Retry</Button></div> : <Skeleton className="h-32 w-full" />}
       </section>
     );
   }
@@ -6406,54 +6406,81 @@ function ContributionCalendar({ host }: { host: string | null }) {
     });
     weeks.push(week);
   }
-  const activeDays = data.days.filter((day) => day.count > 0).length;
-  const number = new Intl.NumberFormat("ru-RU");
-  const periods = [
-    { label: "День", days: 1 },
-    { label: "Неделя", days: 7 },
-    { label: "Месяц", days: 30 },
-    { label: "Год", days: 365 },
-  ].map(({ label, days }) => {
-    const periodStart = new Date(end);
-    periodStart.setUTCDate(periodStart.getUTCDate() - days + 1);
-    const startKey = periodStart.toISOString().slice(0, 10);
-    const matchingDays = data.days.filter((day) => day.date >= startKey && day.date <= data.endDate);
-    return {
-      label,
-      count: matchingDays.reduce((total, day) => total + day.count, 0),
-      activeDays: matchingDays.filter((day) => day.count > 0).length,
-    };
-  });
+  return <ContributionSummary data={data} error={error} weeks={weeks} />;
+}
+
+const CONTRIBUTION_PERIODS = [
+  { id: "week", label: "Week", days: 7 },
+  { id: "month", label: "Month", days: 30 },
+  { id: "year", label: "Year", days: 365 },
+] as const;
+
+function ContributionSummary({
+  data,
+  error,
+  weeks,
+}: {
+  data: ContributionCalendarData;
+  error: string | null;
+  weeks: Array<Array<{ date: string; count: number; inRange: boolean }>>;
+}) {
+  const [period, setPeriod] = useSticky<(typeof CONTRIBUTION_PERIODS)[number]["id"]>("contribution-period", "week");
+  const number = new Intl.NumberFormat();
+  const chosen = CONTRIBUTION_PERIODS.find((entry) => entry.id === period) ?? CONTRIBUTION_PERIODS[0];
+  const periodStart = new Date(`${data.endDate}T00:00:00Z`);
+  periodStart.setUTCDate(periodStart.getUTCDate() - chosen.days + 1);
+  const startKey = periodStart.toISOString().slice(0, 10);
+  const inPeriod = data.days.filter((day) => day.date >= startKey && day.date <= data.endDate);
+  const sum = (key: "count" | "additions" | "deletions") => inPeriod.reduce((total, day) => total + day[key], 0);
+  const commits = sum("count");
+  const stats = [
+    { label: "Commits", value: number.format(commits) },
+    { label: "Lines added", value: `+${number.format(sum("additions"))}`, tone: "text-emerald-700 [.dark_&]:text-emerald-400" },
+    { label: "Lines removed", value: `−${number.format(sum("deletions"))}`, tone: "text-red-700 [.dark_&]:text-red-400" },
+    { label: "Active days", value: number.format(inPeriod.filter((day) => day.count > 0).length) },
+  ];
 
   return (
-    <section className="rounded-[10px] border border-border px-4 py-3" aria-label={`Активность GitLab: ${data.totalCommits} коммитов в пушах за 12 месяцев`}>
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className="text-sm font-semibold text-foreground">{number.format(data.totalCommits)} коммитов в пушах</span>
-          <span className="text-xs text-muted-foreground">за 12 месяцев</span>
+    <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Your GitLab commits">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-semibold text-foreground">Your commits</span>
+        <div role="tablist" aria-label="Period" className="inline-flex rounded-lg bg-foreground/[0.06] p-0.5">
+          {CONTRIBUTION_PERIODS.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              role="tab"
+              aria-selected={entry.id === chosen.id}
+              onClick={() => setPeriod(entry.id)}
+              className={cn(
+                "h-6 rounded-md px-2.5 text-xs transition-colors",
+                entry.id === chosen.id
+                  ? "bg-background font-medium text-foreground shadow-[0_1px_2px_rgba(15,15,15,.1),0_0_0_1px_rgba(15,15,15,.04)]"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {entry.label}
+            </button>
+          ))}
         </div>
-        <span className="text-xs text-muted-foreground">{number.format(data.pushEvents)} пушей · {activeDays} активных дней · {data.host}</span>
+      </div>
+      <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {stats.map((stat) => (
+          <div key={stat.label} className="min-w-0 rounded-lg px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)]">
+            <div className="truncate text-[12px] text-muted-foreground">{stat.label}</div>
+            <div className={cn("text-lg font-semibold tabular-nums text-foreground", stat.tone)}>{stat.value}</div>
+          </div>
+        ))}
       </div>
       <ContributionGrid weeks={weeks} endDate={data.endDate} />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{error ? "Не удалось обновить данные; показана последняя загрузка." : !data.complete ? "Данные ограничены последними 2 000 событиями." : "По push-событиям GitLab; повторные пуши учитываются повторно."}</span>
-        <span className="flex items-center gap-1">Меньше {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} Больше</span>
+        <span>
+          {error
+            ? "Could not refresh; showing the last load."
+            : `Commits you authored, merges excluded, on any branch of ${data.projects} tracked project${data.projects === 1 ? "" : "s"} · ${data.host}${data.complete ? "" : " · capped at 2,000 per project"}`}
+        </span>
+        <span className="flex items-center gap-1">Less {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} More</span>
       </div>
-      <details className="group mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
-        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md px-2 py-1 font-medium hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
-          <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-90">▸</span>
-          Статистика по периодам
-        </summary>
-        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {periods.map((period) => (
-            <div key={period.label} className="min-w-0 rounded-lg border border-border bg-foreground/[0.025] px-3 py-2">
-              <div className="text-[11px] text-muted-foreground">{period.label}</div>
-              <div className="mt-1 text-base font-semibold tabular-nums text-foreground">{number.format(period.count)}</div>
-              <div className="text-[11px] text-muted-foreground">Коммитов в пушах · активных дней: {period.activeDays}</div>
-            </div>
-          ))}
-        </div>
-      </details>
     </section>
   );
 }
@@ -6751,7 +6778,7 @@ function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThread
 }
 
 function GitlabWorkflowSummary() {
-  return <Tag color="orange" className="h-6 px-2 font-medium">🦊 GitLab</Tag>;
+  return <span className="inline-flex h-6 items-center gap-1.5 px-1 text-sm font-medium text-foreground">🦊 GitLab</span>;
 }
 
 function GitlabWorkflowAction({ threadId, projectId, environment }: ExperimentalThreadContextSegmentProps) {
@@ -6790,9 +6817,9 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [rpc, projectId, branch, localHead]);
 
-  if (error) return <Tag color="red" className="text-xs">GitLab недоступен</Tag>;
+  if (error) return <Tag color="red" className="text-xs">GitLab unavailable</Tag>;
   if (workspace === undefined || branch === null || remote?.branch !== branch || remote.project === null) {
-    return <Tag color="gray" className="text-xs">Проверяю…</Tag>;
+    return <Tag color="gray" className="text-xs">Checking…</Tag>;
   }
   const stage = workflowStage({
     dirty: workspace.workingTree.hasUncommittedChanges,
@@ -6802,17 +6829,17 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     mergeRequestIid: remote.mergeRequestIid,
   });
   const labels = {
-    commit: "Закоммитить",
-    push: "Запушить…",
-    "create-mr": "Создать MR",
-    "open-mr": "Открыть MR",
-    idle: "Готово",
+    commit: "Commit",
+    push: "Push…",
+    "create-mr": "Create MR",
+    "open-mr": "Open MR",
+    idle: "Done",
   } as const;
   const prompt = stage === "commit"
-    ? `Проверь изменения в ветке ${branch} и сделай осмысленный коммит. Не включай чужие или не относящиеся к задаче файлы.`
+    ? `Review the changes on branch ${branch} and make a meaningful commit. Do not include files that belong to someone else or are unrelated to the task.`
     : stage === "push"
-      ? `Подготовь пуш ветки ${branch} в GitLab. Перед git push покажи текущую ветку, git status и расхождение с удалённой веткой, затем спроси меня «пушить?». Не пушь до моего ответа.`
-      : `Создай merge request для ветки ${branch} в GitLab. Сначала проверь её состояние, целевую ветку и отсутствие существующего MR.`;
+      ? `Prepare to push branch ${branch} to GitLab. Before git push, show the current branch, git status and how it differs from the remote branch, then ask me "push?". Do not push until I answer.`
+      : `Create a merge request for branch ${branch} in GitLab. First check its state, the target branch, and that no merge request exists yet.`;
   const onClick = async () => {
     if (stage === "open-mr" && remote.mergeRequestIid !== null) {
       navigate.toPluginPanel(PANEL_PATH, {
@@ -6833,7 +6860,7 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
   return (
     <span className="flex items-center gap-2 font-sans">
       {remote.mergeRequestIid !== null && stage !== "open-mr" ? <Tag color="blue" className="text-xs">MR !{remote.mergeRequestIid}</Tag> : null}
-      {stage === "idle" ? <Tag color="green" className="text-xs">Готово</Tag> : <PrimaryButton className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500" disabled={busy} onClick={onClick}>{labels[stage]}</PrimaryButton>}
+      {stage === "idle" ? <Tag color="green" className="text-xs">Done</Tag> : <PrimaryButton className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500" disabled={busy} onClick={onClick}>{labels[stage]}</PrimaryButton>}
     </span>
   );
 }

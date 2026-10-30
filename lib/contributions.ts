@@ -1,27 +1,41 @@
-export interface PushEvent {
-  action_name: string;
-  created_at: string;
-  push_data?: { commit_count: number } | null;
+// The viewer's own commits per day: counted from commits they authored (not
+// push events, which also carry every commit of a rebased branch).
+
+export interface AuthoredCommit {
+  id: string;
+  authored_date: string;
+  /** Two or more parents: a merge, which carries other people's work. */
+  parent_ids?: readonly string[];
+  stats?: { additions: number; deletions: number } | null;
 }
 
-export function aggregatePushEvents(
-  events: readonly PushEvent[],
+export interface ContributionDay {
+  date: string;
+  count: number;
+  additions: number;
+  deletions: number;
+}
+
+/** One entry per commit SHA (seen in several branches, it counts once); merges are skipped. */
+export function aggregateCommits(
+  commits: readonly AuthoredCommit[],
   startDate: string,
   endDate: string,
   dateOf: (timestamp: string) => string,
-): { pushEvents: number; days: { date: string; count: number }[] } {
-  const counts = new Map<string, number>();
-  let pushEvents = 0;
-  for (const event of events) {
-    if (!event.action_name.startsWith("pushed") || !event.created_at) continue;
-    const date = dateOf(event.created_at);
+): ContributionDay[] {
+  const seen = new Set<string>();
+  const days = new Map<string, ContributionDay>();
+  for (const commit of commits) {
+    if (!commit.authored_date || seen.has(commit.id)) continue;
+    if ((commit.parent_ids?.length ?? 1) > 1) continue;
+    seen.add(commit.id);
+    const date = dateOf(commit.authored_date);
     if (date < startDate || date > endDate) continue;
-    pushEvents += 1;
-    const count = Math.max(0, event.push_data?.commit_count ?? 0);
-    counts.set(date, (counts.get(date) ?? 0) + count);
+    const day = days.get(date) ?? { date, count: 0, additions: 0, deletions: 0 };
+    day.count += 1;
+    day.additions += Math.max(0, commit.stats?.additions ?? 0);
+    day.deletions += Math.max(0, commit.stats?.deletions ?? 0);
+    days.set(date, day);
   }
-  return {
-    pushEvents,
-    days: [...counts].map(([date, count]) => ({ date, count })).sort((a, b) => a.date.localeCompare(b.date)),
-  };
+  return [...days.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
