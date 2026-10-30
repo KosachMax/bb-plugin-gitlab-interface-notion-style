@@ -40,7 +40,6 @@ import {
   type ExperimentalThreadTabProps,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { toast } from "sonner";
 import type { gitlabRpcContract } from "./server";
@@ -6674,7 +6673,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   );
 }
 
-const gitStatusContract = defineRpcContract({
+const gitStatusContract = {
   status: {
     input: z.object({ keys: z.array(z.string()) }),
     output: z.record(z.string(), z.object({
@@ -6687,7 +6686,7 @@ const gitStatusContract = defineRpcContract({
       }).optional(),
     })),
   },
-});
+};
 
 function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThreadContextSegmentProps) {
   const rpc = useRpc<typeof gitlabRpcContract>();
