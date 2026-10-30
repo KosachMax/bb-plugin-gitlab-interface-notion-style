@@ -22,6 +22,7 @@ import {
 import { z } from "zod";
 import { explainMergeFailure, mergeAllowance, mergeQuery } from "./lib/merge";
 import { groupOwnMergeRequest } from "./lib/dashboard";
+import { aggregatePushEvents, type PushEvent } from "./lib/contributions";
 import { classifyPromotion, normalizedPatch, type PromotionCommit } from "./lib/promotion";
 import {
   classifyJobStatus,
@@ -614,6 +615,26 @@ export const gitlabRpcContract = defineRpcContract({
   mergeRequestForThread: {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.object({ mergeRequest: itemInputSchema.nullable() }).strict(),
+  },
+  workflowForBranch: {
+    input: z.object({ projectId: z.string().min(1), branch: z.string().min(1) }).strict(),
+    output: z.object({
+      project: projectRefSchema.nullable(),
+      remoteHead: z.string().nullable(),
+      mergeRequestIid: iidSchema.nullable(),
+    }).strict(),
+  },
+  contributionCalendar: {
+    input: z.object({ host: z.string().min(1).max(255), timeZone: z.string().min(1).max(100) }).strict(),
+    output: z.object({
+      host: z.string(),
+      startDate: z.string(),
+      endDate: z.string(),
+      totalCommits: z.number().int().nonnegative(),
+      pushEvents: z.number().int().nonnegative(),
+      complete: z.boolean(),
+      days: z.array(z.object({ date: z.string(), count: z.number().int().nonnegative() }).strict()),
+    }).strict(),
   },
   listLinks: {
     input: z.null(),
@@ -2223,7 +2244,7 @@ export default async function plugin(bb: BbPluginApi) {
   // Viewer identity + per-project members and labels, cached in memory so the
   // filter chips and assignee picker don't hit the network on every render.
   // ------------------------------------------------------------------
-  const viewerCache = new Map<string, { username: string; fetchedAt: number }>();
+  const viewerCache = new Map<string, { id: number; username: string; fetchedAt: number }>();
   const membersCache = new Map<
     string,
     { members: GitlabUserRow[]; fetchedAt: number }
@@ -2233,22 +2254,77 @@ export default async function plugin(bb: BbPluginApi) {
     { labels: string[]; colors: Record<string, string>; fetchedAt: number }
   >();
 
-  async function getViewer(host?: string): Promise<string> {
+  async function getViewerProfile(host?: string): Promise<{ id: number; username: string }> {
     const resolvedHost = host ?? authenticatedHosts[0]?.host;
     if (resolvedHost === undefined) {
       throw needsConfiguration(`No authenticated GitLab host. ${GLAB_HINT}`);
     }
     const cached = viewerCache.get(resolvedHost);
     if (cached !== undefined && Date.now() - cached.fetchedAt < 60 * 60_000) {
-      return cached.username;
+      return cached;
     }
     const raw = await glab(["api", "--hostname", resolvedHost, "user"], 15_000);
-    const { username } = gitlabUserRowSchema.parse(JSON.parse(raw));
-    if (username.length === 0) {
+    const { id, username } = gitlabUserRowSchema.parse(JSON.parse(raw));
+    if (id <= 0 || username.length === 0) {
       throw new Error(`could not resolve the glab user on ${resolvedHost}`);
     }
-    viewerCache.set(resolvedHost, { username, fetchedAt: Date.now() });
-    return username;
+    viewerCache.set(resolvedHost, { id, username, fetchedAt: Date.now() });
+    return { id, username };
+  }
+
+  async function getViewer(host?: string): Promise<string> {
+    return (await getViewerProfile(host)).username;
+  }
+
+  const calendarCache = new Map<string, { at: number; value: Promise<{
+    host: string; startDate: string; endDate: string; totalCommits: number;
+    pushEvents: number; complete: boolean; days: { date: string; count: number }[];
+  }> }>();
+
+  async function contributionCalendar(host: string, timeZone: string) {
+    if (!authenticatedHosts.some((entry) => entry.host === host)) {
+      throw new Error(`GitLab host ${host} is not configured`);
+    }
+    const dateFormat = new Intl.DateTimeFormat("sv-SE", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    const now = Date.now();
+    const startDate = dateFormat.format(new Date(now - 364 * 86_400_000));
+    const endDate = dateFormat.format(new Date(now));
+    const key = `${host}|${timeZone}|${startDate}|${endDate}`;
+    const cached = calendarCache.get(key);
+    if (cached && now - cached.at < 30 * 60_000) return cached.value;
+    const value = (async () => {
+      const { id } = await getViewerProfile(host);
+      const allEvents: PushEvent[] = [];
+      let complete = false;
+      // Include an extra day around the time-zone boundary. The displayed
+      // range is filtered below using the viewer's local calendar dates.
+      const after = new Date(now - 366 * 86_400_000).toISOString().slice(0, 10);
+      for (let page = 1; page <= 20; page += 1) {
+        const endpoint = `/users/${id}/events?action=pushed&after=${after}&per_page=100&page=${page}`;
+        const raw = JSON.parse(await glab(["api", "--hostname", host, endpoint], 30_000)) as unknown;
+        const events = z.array(z.looseObject({
+          action_name: z.string().catch(""),
+          created_at: z.string().catch(""),
+          push_data: z.looseObject({ commit_count: z.number().int().nonnegative().catch(0) }).nullish().catch(null),
+        })).parse(raw);
+        allEvents.push(...events);
+        if (events.length < 100) { complete = true; break; }
+      }
+      const { days, pushEvents } = aggregatePushEvents(
+        allEvents, startDate, endDate,
+        (timestamp) => dateFormat.format(new Date(timestamp)),
+      );
+      return {
+        host, startDate, endDate,
+        totalCommits: days.reduce((sum, day) => sum + day.count, 0),
+        pushEvents, complete, days,
+      };
+    })();
+    calendarCache.set(key, { at: now, value });
+    value.catch(() => calendarCache.delete(key));
+    return value;
   }
 
   async function getMembers(project: string): Promise<GitlabUserRow[]> {
@@ -2357,6 +2433,31 @@ export default async function plugin(bb: BbPluginApi) {
   // rpc — the frontend data plane.
   // ------------------------------------------------------------------
   bb.rpc.register(gitlabRpcContract, {
+    async contributionCalendar({ host, timeZone }) {
+      return await contributionCalendar(host, timeZone);
+    },
+    async workflowForBranch({ projectId, branch }) {
+      const project = (await discoverProjects()).find((row) => row.bbProjectId === projectId)?.project;
+      if (project === undefined) return { project: null, remoteHead: null, mergeRequestIid: null };
+      const base = projectApiBase(project);
+      const [branchResult, mrResult] = await Promise.all([
+        gitlabApi(project, `${base}/repository/branches/${encodeURIComponent(branch)}`)
+          .catch((error: unknown) => {
+            if (/\b404\b/.test(error instanceof Error ? error.message : String(error))) return null;
+            throw error;
+          }),
+        gitlabApi(project, `${base}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&per_page=100`),
+      ]);
+      const remoteHead = branchResult === null
+        ? null
+        : z.looseObject({ commit: z.looseObject({ id: z.string() }) }).parse(branchResult).commit.id;
+      const mergeRequests = z.array(gitlabMergeRequestRowSchema).parse(mrResult);
+      return {
+        project,
+        remoteHead,
+        mergeRequestIid: mergeRequests.find((row) => row.source_branch === branch)?.iid ?? null,
+      };
+    },
     /** () → auth/sync status for the panel banner. */
     async status() {
       const cursor = await bb.storage.kv.get<{
@@ -3316,20 +3417,26 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const thread = await bb.sdk.threads.get({ threadId });
         if (thread.environmentId !== null) {
-          const result = await bb.sdk.environments.pullRequest({
-            environmentId: thread.environmentId,
+          const result = await bb.sdk.plugins.callRpc({
+            pluginId: "bb--git",
+            method: "workspaceStatus",
+            input: { environmentId: thread.environmentId },
+            outputSchema: z.object({
+              outcome: z.string(),
+              workspace: z.object({
+                branch: z.object({ currentBranch: z.string().nullable() }),
+              }).optional(),
+            }),
           });
-          const match =
-            result.outcome === "available"
-              ? result.pullRequest.url.match(
-                  /^https?:\/\/([^/]+)\/(.+?)\/-\/merge_requests\/(\d+)/,
-                )
-              : null;
-          if (match !== null) {
-            const ref = `${match[1].toLowerCase()}/${match[2]}`;
-            if (isProjectRef(ref)) {
-              return { mergeRequest: { project: ref, iid: Number(match[3]) } };
-            }
+          const branch = result.workspace?.branch.currentBranch;
+          const project = (await discoverProjects()).find((row) => row.bbProjectId === thread.projectId)?.project;
+          if (result.outcome === "available" && branch && project) {
+            const rows = z.array(gitlabMergeRequestRowSchema).parse(await gitlabApi(
+              project,
+              `${projectApiBase(project)}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&per_page=100`,
+            ));
+            const match = rows.find((row) => row.source_branch === branch);
+            if (match) return { mergeRequest: { project, iid: match.iid } };
           }
         }
       } catch {

@@ -33,10 +33,15 @@ import {
   useBbNavigate,
   useRealtime,
   useRpc,
+  useSdk,
+  experimental_useRpcKeyedQuery,
   type PluginHomepageSectionProps,
   type PluginNavPanelProps,
-  type PluginThreadPanelProps,
+  type ExperimentalThreadTabProps,
+  type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
+import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { toast } from "sonner";
 import type { gitlabRpcContract } from "./server";
 import { Button } from "@/components/ui/button";
@@ -111,6 +116,7 @@ import {
 } from "@/lib/pipeline";
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
+import { workflowStage } from "@/lib/workflow";
 import {
   MARKER,
   matchesItemQuery,
@@ -5757,7 +5763,7 @@ function MergeRequestPickerList({
   );
 }
 
-function MergeRequestPanelTab({ threadId }: PluginThreadPanelProps) {
+function MergeRequestPanelTab({ threadId }: ExperimentalThreadTabProps) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const [resolved, setResolved] = useState(false);
   const [selected, setSelected] = useSticky<{
@@ -6281,6 +6287,132 @@ interface HomeRow {
   labels: string[];
 }
 
+interface ContributionCalendarData {
+  host: string;
+  startDate: string;
+  endDate: string;
+  totalCommits: number;
+  pushEvents: number;
+  complete: boolean;
+  days: { date: string; count: number }[];
+}
+
+const CONTRIBUTION_LEVELS = [
+  "bg-foreground/[0.06]",
+  "bg-[#f6c8ad] [.dark_&]:bg-[#5d2b1b]",
+  "bg-[#f49c6c] [.dark_&]:bg-[#9b421f]",
+  "bg-[#e56b35] [.dark_&]:bg-[#d45c2a]",
+  "bg-[#ad421b] [.dark_&]:bg-[#fc6d26]",
+] as const;
+
+function contributionLevel(count: number): number {
+  if (count === 0) return 0;
+  if (count < 3) return 1;
+  if (count < 7) return 2;
+  if (count < 15) return 3;
+  return 4;
+}
+
+function ContributionCalendar({ host }: { host: string | null }) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const cacheKey = `contribution-calendar:${host}:${timeZone}`;
+  const [data, setData] = useState<ContributionCalendarData | null>(() => cachedRead(cacheKey));
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const load = useCallback(() => {
+    if (host === null) return;
+    rpc.call("contributionCalendar", { host, timeZone }).then(
+      (value) => { cachedWrite(cacheKey, value); setData(value); setError(null); },
+      (cause: unknown) => setError(errorText(cause)),
+    );
+  }, [rpc, host, timeZone, cacheKey]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+  }, [data?.endDate]);
+  if (host === null) return null;
+  if (data === null) {
+    return (
+      <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Активность GitLab">
+        <div className="mb-3 text-sm font-semibold text-foreground">Коммиты в GitLab</div>
+        {error ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Не удалось загрузить активность.</span><Button size="sm" variant="ghost" onClick={load}>Повторить</Button></div> : <Skeleton className="h-32 w-full" />}
+      </section>
+    );
+  }
+
+  const byDate = new Map(data.days.map((day) => [day.date, day.count]));
+  const start = new Date(`${data.startDate}T00:00:00Z`);
+  const end = new Date(`${data.endDate}T00:00:00Z`);
+  const first = new Date(start);
+  first.setUTCDate(first.getUTCDate() - first.getUTCDay());
+  const weeks: Array<Array<{ date: string; count: number; inRange: boolean }>> = [];
+  for (let weekStart = new Date(first); weekStart <= end; weekStart.setUTCDate(weekStart.getUTCDate() + 7)) {
+    const week = Array.from({ length: 7 }, (_, dayOffset) => {
+      const date = new Date(weekStart);
+      date.setUTCDate(date.getUTCDate() + dayOffset);
+      const key = date.toISOString().slice(0, 10);
+      return { date: key, count: byDate.get(key) ?? 0, inRange: date >= start && date <= end };
+    });
+    weeks.push(week);
+  }
+  const months = weeks.map((week) => {
+    const firstOfMonth = week.find((day) => day.inRange && day.date.endsWith("-01"));
+    return firstOfMonth
+      ? new Date(`${firstOfMonth.date}T00:00:00Z`).toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" })
+      : "";
+  });
+  const activeDays = data.days.filter((day) => day.count > 0).length;
+  const number = new Intl.NumberFormat("ru-RU");
+
+  return (
+    <section className="rounded-[10px] border border-border px-4 py-3" aria-label={`Активность GitLab: ${data.totalCommits} коммитов в пушах за 12 месяцев`}>
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-sm font-semibold text-foreground">{number.format(data.totalCommits)} коммитов в пушах</span>
+          <span className="text-xs text-muted-foreground">за 12 месяцев</span>
+        </div>
+        <span className="text-xs text-muted-foreground">{number.format(data.pushEvents)} пушей · {activeDays} активных дней · {data.host}</span>
+      </div>
+      <div ref={scrollRef} className="overflow-x-auto pb-1" aria-hidden="true">
+        <div className="min-w-max">
+          <div className="mb-1.5 flex gap-[3px] pl-7">
+            {months.map((month, index) => <span key={index} className="w-[11px] shrink-0 text-[10px] leading-4 text-muted-foreground">{month}</span>)}
+          </div>
+          <div className="flex gap-2">
+            <div className="grid grid-rows-7 gap-[3px] text-[10px] leading-[11px] text-muted-foreground">
+              {["", "Пн", "", "Ср", "", "Пт", ""].map((day, index) => <span key={index} className="h-[11px] w-5">{day}</span>)}
+            </div>
+            <div className="flex gap-[3px]">
+              {weeks.map((week, index) => (
+                <div key={index} className="grid grid-rows-7 gap-[3px]">
+                  {week.map((day) => (
+                    <span
+                      key={day.date}
+                      title={day.inRange ? `${day.date}: ${day.count} коммитов в пушах` : undefined}
+                      className={cn("h-[11px] w-[11px] rounded-[2px]", day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent", day.date === data.endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background")}
+                    />
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span>{error ? "Не удалось обновить данные; показана последняя загрузка." : !data.complete ? "Данные ограничены последними 2 000 событиями." : "По push-событиям GitLab; повторные пуши учитываются повторно."}</span>
+        <span className="flex items-center gap-1">Меньше {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} Больше</span>
+      </div>
+      <details className="mt-2 text-xs text-muted-foreground">
+        <summary className="w-fit cursor-pointer rounded-sm hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Данные по дням</summary>
+        <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto pl-4">
+          {data.days.filter((day) => day.count > 0).map((day) => <li key={day.date}>{day.date}: {day.count} коммитов в пушах</li>)}
+        </ul>
+      </details>
+    </section>
+  );
+}
+
 const HOME_GROUPS: Record<HomeGroup, { emoji: string; label: string; empty: string }> = {
   action: { emoji: "🔥", label: "Needs your action", empty: "Nothing is waiting on you." },
   ready: { emoji: "✅", label: "Ready to merge", empty: "None of your merge requests is ready yet." },
@@ -6333,6 +6465,8 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
     projectId === null
       ? null
       : (status?.projects.find((entry) => entry.bbProjectId === projectId)?.project ?? null);
+  const heatmapHost = scoped?.split("/")[0] ?? status?.hosts[0] ?? null;
+  const heatmap = <ContributionCalendar key={heatmapHost ?? ""} host={heatmapHost} />;
   const groups = settings.homeGroups.filter((id): id is HomeGroup => id in HOME_GROUPS);
   const wantsMrs = groups.some((id) => id !== "issues");
   const cacheKey = `home-dashboard:${scoped ?? "all"}`;
@@ -6358,7 +6492,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   useRealtime("data-changed", load);
 
   if (settings.homeLayout === "off" || groups.length === 0) return null;
-  if (wantsMrs && items === null) return error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />;
+  if (wantsMrs && items === null) return <div className="flex flex-col gap-3">{heatmap}{error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />}</div>;
 
   // Rows per group, from the one MR answer and the cached issues.
   const splitDrafts = groups.includes("drafts");
@@ -6466,7 +6600,8 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   if (settings.homeLayout === "sections") {
     const collapsed = (id: HomeGroup) => toggled[id] ?? settings.homeCollapsed.includes(id);
     return (
-      <div className="flex flex-col gap-0.5">
+      <div className="flex flex-col gap-3">
+        {heatmap}
         {staleNote}
         {visible.map(({ id, rows }) => {
           const closed = collapsed(id);
@@ -6500,6 +6635,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   const current = visible.find((entry) => entry.id === group) ?? visible[0];
   return (
     <div className="flex flex-col gap-3">
+      {heatmap}
       <div
         className="grid gap-2"
         style={{ gridTemplateColumns: `repeat(${visible.length <= 5 ? visible.length : 3}, minmax(0, 1fr))` }}
@@ -6538,7 +6674,134 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   );
 }
 
+const gitStatusContract = defineRpcContract({
+  status: {
+    input: z.object({ keys: z.array(z.string()) }),
+    output: z.record(z.string(), z.object({
+      outcome: z.string(),
+      workspace: z.object({
+        workingTree: z.object({ hasUncommittedChanges: z.boolean() }),
+        checkout: z.object({ headSha: z.string().nullable().optional() }),
+        branch: z.object({ currentBranch: z.string().nullable() }),
+        mergeBase: z.object({ aheadCount: z.number() }).nullable(),
+      }).optional(),
+    })),
+  },
+});
+
+function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThreadContextSegmentProps) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (environment === null) { setVisible(false); return; }
+    setVisible(false);
+    let cancelled = false;
+    rpc.call("status", null).then(
+      (result) => { if (!cancelled) setVisible(result.projects.some((project) => project.bbProjectId === projectId)); },
+      () => { if (!cancelled) setVisible(false); },
+    );
+    return () => { cancelled = true; };
+  }, [rpc, projectId, environment?.id]);
+  return visible;
+}
+
+function GitlabWorkflowSummary() {
+  return <span className="whitespace-nowrap text-sm text-muted-foreground">🦊 GitLab</span>;
+}
+
+function GitlabWorkflowAction({ threadId, projectId, environment }: ExperimentalThreadContextSegmentProps) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const sdk = useSdk();
+  const navigate = useBbNavigate();
+  const [remote, setRemote] = useState<{
+    branch: string;
+    project: string | null;
+    remoteHead: string | null;
+    mergeRequestIid: number | null;
+  } | null>(null);
+  const [error, setError] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const git = experimental_useRpcKeyedQuery({
+    pluginId: "bb--git", contract: gitStatusContract, method: "status",
+    keys: environment === null ? [] : [environment.id],
+  });
+  const workspace = environment === null ? undefined : git.data?.[environment.id]?.workspace;
+  const branch = workspace?.branch.currentBranch ?? null;
+  const localHead = workspace?.checkout.headSha ?? null;
+
+  useEffect(() => {
+    if (branch === null) { setRemote(null); return; }
+    let cancelled = false;
+    const refresh = () => {
+      rpc.call("workflowForBranch", { projectId, branch }).then(
+        (result) => {
+          if (!cancelled) { setRemote({ branch, ...result }); setError(false); }
+        },
+        () => { if (!cancelled) setError(true); },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 20_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [rpc, projectId, branch, localHead]);
+
+  if (error) return <span className="text-xs text-muted-foreground">GitLab недоступен</span>;
+  if (workspace === undefined || branch === null || remote?.branch !== branch || remote.project === null) {
+    return <span className="text-xs text-muted-foreground">Проверяю…</span>;
+  }
+  const stage = workflowStage({
+    dirty: workspace.workingTree.hasUncommittedChanges,
+    localHead,
+    remoteHead: remote.remoteHead,
+    aheadOfBase: workspace.mergeBase?.aheadCount ?? 0,
+    mergeRequestIid: remote.mergeRequestIid,
+  });
+  const labels = {
+    commit: "Закоммитить",
+    push: "Запушить…",
+    "create-mr": "Создать MR",
+    "open-mr": "Открыть MR",
+    idle: "Готово",
+  } as const;
+  const prompt = stage === "commit"
+    ? `Проверь изменения в ветке ${branch} и сделай осмысленный коммит. Не включай чужие или не относящиеся к задаче файлы.`
+    : stage === "push"
+      ? `Подготовь пуш ветки ${branch} в GitLab. Перед git push покажи текущую ветку, git status и расхождение с удалённой веткой, затем спроси меня «пушить?». Не пушь до моего ответа.`
+      : `Создай merge request для ветки ${branch} в GitLab. Сначала проверь её состояние, целевую ветку и отсутствие существующего MR.`;
+  const onClick = async () => {
+    if (stage === "open-mr" && remote.mergeRequestIid !== null) {
+      navigate.toPluginPanel(PANEL_PATH, {
+        subPath: `merge_requests/${remote.project}/${remote.mergeRequestIid}`,
+      });
+      return;
+    }
+    if (stage === "idle" || busy) return;
+    setBusy(true);
+    try {
+      await sdk.threads.send({ threadId, input: [{ type: "text", text: prompt, mentions: [] }], mode: "auto" });
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span className="flex items-center gap-2">
+      {remote.mergeRequestIid !== null && stage !== "open-mr" ? <span className="text-xs text-muted-foreground">MR !{remote.mergeRequestIid}</span> : null}
+      {stage === "idle" ? <span className="text-xs text-muted-foreground">Готово</span> : <Button size="sm" variant="outline" disabled={busy} onClick={onClick}>{labels[stage]}</Button>}
+    </span>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.slots.experimental_threadContextSegment({
+    id: "gitlab-workflow",
+    title: "GitLab workflow",
+    group: "4_gitlab",
+    summary: GitlabWorkflowSummary,
+    action: GitlabWorkflowAction,
+    useVisible: useGitlabWorkflowVisible,
+  });
   app.slots.navPanel({
     id: "gitlab-ui",
     title: "GitLab Interface",
@@ -6556,14 +6819,21 @@ export default definePluginApp((app) => {
       </ViewerScope>
     ),
   });
-  app.slots.threadPanelAction({
+  app.slots.experimental_tab({
+    context: { kind: "thread" },
+    availability: "action",
     id: "merge-request",
     title: "Merge request",
     icon: "GitMerge",
-    component: (props: PluginThreadPanelProps) => (
+    component: (props: ExperimentalThreadTabProps) => (
       <ViewerScope>
         <MergeRequestPanelTab {...props} />
       </ViewerScope>
     ),
+    run: ({ experimental_panel }) => {
+      experimental_panel.openTab({
+        tab: { id: "merge-request", context: { kind: "thread" }, availability: "action" },
+      });
+    },
   });
 });

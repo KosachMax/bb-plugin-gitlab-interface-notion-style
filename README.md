@@ -17,6 +17,16 @@ Screenshots use invented demo data.
 
 ## Features
 
+- **GitLab activity above the dashboard.** A 12-month heatmap shows daily
+  pushed-commit counts, total commits in push events, push events, and active
+  days for the signed-in GitLab account. It uses the authenticated Events API,
+  so the values describe pushes and can differ from GitLab's profile-wide
+  "contributions" total. Results are cached for 30 minutes.
+- **🦊 GitLab next action in a thread.** The context row checks local changes,
+  the GitLab branch, and its open merge request. It suggests committing,
+  preparing a push, creating an MR, or opening the existing MR. Commit and MR
+  creation start the thread's agent; pushing asks for explicit confirmation
+  after the agent shows the branch and status.
 - **A Notion-style panel.** Issues, merge requests, pipelines, and branches are
   four views of one database: view tabs, filter pills, inline search,
   hairline-ruled tables with hover-only row actions. Each item opens as a page.
