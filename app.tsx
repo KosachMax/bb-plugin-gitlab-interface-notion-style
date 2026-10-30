@@ -6312,13 +6312,67 @@ function contributionLevel(count: number): number {
   return 4;
 }
 
+function ContributionGrid({ weeks, endDate }: {
+  weeks: Array<Array<{ date: string; count: number; inRange: boolean }>>;
+  endDate: string;
+}) {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridWidth, setGridWidth] = useState(0);
+  useEffect(() => {
+    const element = gridRef.current;
+    if (!element) return;
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      if (entry) setGridWidth(entry.contentRect.width);
+    });
+    resizeObserver.observe(element);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  // Keep cells legible in narrow panes instead of adding a second scrollbar.
+  const visibleCount = gridWidth > 0 ? Math.max(1, Math.floor((gridWidth + 2) / 10)) : weeks.length;
+  const visibleWeeks = weeks.slice(-visibleCount);
+  const columns = { gridTemplateColumns: `repeat(${visibleWeeks.length}, minmax(0, 1fr))` };
+  const monthLabels = visibleWeeks.map((week, index) => {
+    const monthStart = week.find((day) => day.inRange && day.date.endsWith("-01"))?.date;
+    const month = monthStart?.slice(0, 7) ?? (index === 0 ? week.find((day) => day.inRange)?.date.slice(0, 7) : undefined);
+    return month
+      ? new Date(`${month}-01T00:00:00Z`).toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" })
+      : "";
+  });
+
+  return (
+    <div className="flex min-w-0 gap-2" aria-hidden="true">
+      <div className="grid shrink-0 grid-rows-7 gap-[2px] pt-[22px] text-[10px] leading-none text-muted-foreground">
+        {["", "Пн", "", "Ср", "", "Пт", ""].map((day, index) => <span key={index} className="flex w-5 items-center">{day}</span>)}
+      </div>
+      <div ref={gridRef} className="min-w-0 max-w-[800px] flex-1">
+        <div className="mb-1.5 grid gap-[2px]" style={columns}>
+          {monthLabels.map((month, index) => <span key={index} className="h-4 whitespace-nowrap text-[10px] leading-4 text-muted-foreground">{month}</span>)}
+        </div>
+        <div className="grid gap-[2px]" style={columns}>
+          {visibleWeeks.map((week) => (
+            <div key={week[0]?.date} className="grid min-w-0 grid-rows-7 gap-[2px]">
+              {week.map((day) => (
+                <span
+                  key={day.date}
+                  title={day.inRange ? `${day.date}: ${day.count} коммитов в пушах` : undefined}
+                  className={cn("aspect-square w-full rounded-[2px]", day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent", day.date === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background")}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ContributionCalendar({ host }: { host: string | null }) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const cacheKey = `contribution-calendar:${host}:${timeZone}`;
   const [data, setData] = useState<ContributionCalendarData | null>(() => cachedRead(cacheKey));
   const [error, setError] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const load = useCallback(() => {
     if (host === null) return;
     rpc.call("contributionCalendar", { host, timeZone }).then(
@@ -6327,9 +6381,6 @@ function ContributionCalendar({ host }: { host: string | null }) {
     );
   }, [rpc, host, timeZone, cacheKey]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
-  }, [data?.endDate]);
   if (host === null) return null;
   if (data === null) {
     return (
@@ -6355,12 +6406,6 @@ function ContributionCalendar({ host }: { host: string | null }) {
     });
     weeks.push(week);
   }
-  const months = weeks.map((week) => {
-    const firstOfMonth = week.find((day) => day.inRange && day.date.endsWith("-01"));
-    return firstOfMonth
-      ? new Date(`${firstOfMonth.date}T00:00:00Z`).toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" })
-      : "";
-  });
   const activeDays = data.days.filter((day) => day.count > 0).length;
   const number = new Intl.NumberFormat("ru-RU");
 
@@ -6373,38 +6418,14 @@ function ContributionCalendar({ host }: { host: string | null }) {
         </div>
         <span className="text-xs text-muted-foreground">{number.format(data.pushEvents)} пушей · {activeDays} активных дней · {data.host}</span>
       </div>
-      <div ref={scrollRef} className="overflow-x-auto pb-1" aria-hidden="true">
-        <div className="min-w-max">
-          <div className="mb-1.5 flex gap-[3px] pl-7">
-            {months.map((month, index) => <span key={index} className="w-[11px] shrink-0 text-[10px] leading-4 text-muted-foreground">{month}</span>)}
-          </div>
-          <div className="flex gap-2">
-            <div className="grid grid-rows-7 gap-[3px] text-[10px] leading-[11px] text-muted-foreground">
-              {["", "Пн", "", "Ср", "", "Пт", ""].map((day, index) => <span key={index} className="h-[11px] w-5">{day}</span>)}
-            </div>
-            <div className="flex gap-[3px]">
-              {weeks.map((week, index) => (
-                <div key={index} className="grid grid-rows-7 gap-[3px]">
-                  {week.map((day) => (
-                    <span
-                      key={day.date}
-                      title={day.inRange ? `${day.date}: ${day.count} коммитов в пушах` : undefined}
-                      className={cn("h-[11px] w-[11px] rounded-[2px]", day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent", day.date === data.endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background")}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
+      <ContributionGrid weeks={weeks} endDate={data.endDate} />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span>{error ? "Не удалось обновить данные; показана последняя загрузка." : !data.complete ? "Данные ограничены последними 2 000 событиями." : "По push-событиям GitLab; повторные пуши учитываются повторно."}</span>
         <span className="flex items-center gap-1">Меньше {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} Больше</span>
       </div>
       <details className="mt-2 text-xs text-muted-foreground">
         <summary className="w-fit cursor-pointer rounded-sm hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Данные по дням</summary>
-        <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto pl-4">
+        <ul className="mt-2 space-y-1 pl-4">
           {data.days.filter((day) => day.count > 0).map((day) => <li key={day.date}>{day.date}: {day.count} коммитов в пушах</li>)}
         </ul>
       </details>
