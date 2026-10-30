@@ -6408,6 +6408,22 @@ function ContributionCalendar({ host }: { host: string | null }) {
   }
   const activeDays = data.days.filter((day) => day.count > 0).length;
   const number = new Intl.NumberFormat("ru-RU");
+  const periods = [
+    { label: "День", days: 1 },
+    { label: "Неделя", days: 7 },
+    { label: "Месяц", days: 30 },
+    { label: "Год", days: 365 },
+  ].map(({ label, days }) => {
+    const periodStart = new Date(end);
+    periodStart.setUTCDate(periodStart.getUTCDate() - days + 1);
+    const startKey = periodStart.toISOString().slice(0, 10);
+    const matchingDays = data.days.filter((day) => day.date >= startKey && day.date <= data.endDate);
+    return {
+      label,
+      count: matchingDays.reduce((total, day) => total + day.count, 0),
+      activeDays: matchingDays.filter((day) => day.count > 0).length,
+    };
+  });
 
   return (
     <section className="rounded-[10px] border border-border px-4 py-3" aria-label={`Активность GitLab: ${data.totalCommits} коммитов в пушах за 12 месяцев`}>
@@ -6423,11 +6439,20 @@ function ContributionCalendar({ host }: { host: string | null }) {
         <span>{error ? "Не удалось обновить данные; показана последняя загрузка." : !data.complete ? "Данные ограничены последними 2 000 событиями." : "По push-событиям GitLab; повторные пуши учитываются повторно."}</span>
         <span className="flex items-center gap-1">Меньше {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} Больше</span>
       </div>
-      <details className="mt-2 text-xs text-muted-foreground">
-        <summary className="w-fit cursor-pointer rounded-sm hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Данные по дням</summary>
-        <ul className="mt-2 space-y-1 pl-4">
-          {data.days.filter((day) => day.count > 0).map((day) => <li key={day.date}>{day.date}: {day.count} коммитов в пушах</li>)}
-        </ul>
+      <details className="group mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
+        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md px-2 py-1 font-medium hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+          <span aria-hidden="true" className="inline-block transition-transform group-open:rotate-90">▸</span>
+          Статистика по периодам
+        </summary>
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {periods.map((period) => (
+            <div key={period.label} className="min-w-0 rounded-lg border border-border bg-foreground/[0.025] px-3 py-2">
+              <div className="text-[11px] text-muted-foreground">{period.label}</div>
+              <div className="mt-1 text-base font-semibold tabular-nums text-foreground">{number.format(period.count)}</div>
+              <div className="text-[11px] text-muted-foreground">Коммитов в пушах · активных дней: {period.activeDays}</div>
+            </div>
+          ))}
+        </div>
       </details>
     </section>
   );
