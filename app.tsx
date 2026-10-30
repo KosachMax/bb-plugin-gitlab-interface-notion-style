@@ -95,6 +95,7 @@ import {
 } from "@/components/searchable-menu";
 import { cn } from "@/lib/utils";
 import { mergeAllowance } from "@/lib/merge";
+import { dashboardReason } from "@/lib/dashboard";
 import {
   emojiFor,
   reviewVerdict,
@@ -6232,6 +6233,175 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// New-thread dashboard: four counters (what needs you, what can merge, what
+// you should review, what waits on others) over one list of the chosen group.
+// ---------------------------------------------------------------------------
+
+type HomeGroup = "action" | "ready" | "review" | "waiting";
+interface HomeItem {
+  group: HomeGroup;
+  project: string;
+  iid: number;
+  title: string;
+  author: string;
+  draft: boolean;
+  status: string;
+  updatedAt: string;
+  url: string;
+}
+
+const HOME_GROUPS: Array<{ id: HomeGroup; emoji: string; label: string; empty: string }> = [
+  { id: "action", emoji: "🔥", label: "Needs your action", empty: "Nothing is waiting on you." },
+  { id: "ready", emoji: "✅", label: "Ready to merge", empty: "None of your merge requests is ready yet." },
+  { id: "review", emoji: "👀", label: "Waiting for your review", empty: "No review requests." },
+  { id: "waiting", emoji: "⏳", label: "Waiting on others", empty: "No merge requests waiting on others." },
+];
+
+const HOME_TONE: Record<string, string> = {
+  bad: "bg-red-500/[0.12] text-red-700 [.dark_&]:text-red-300",
+  warn: "bg-amber-500/[0.15] text-amber-800 [.dark_&]:text-amber-300",
+  ok: "bg-emerald-600/[0.14] text-emerald-800 [.dark_&]:text-emerald-300",
+  info: "bg-[rgba(35,131,226,.1)] text-[rgb(35,131,226)]",
+  neutral: "bg-foreground/[0.07] text-muted-foreground",
+};
+
+function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const navigate = useBbNavigate();
+  const status = useStatus();
+  const { spawn, spawningKey } = useSpawn();
+  const scoped =
+    projectId === null
+      ? null
+      : (status?.projects.find((entry) => entry.bbProjectId === projectId)?.project ?? null);
+  const cacheKey = `home-dashboard:${scoped ?? "all"}`;
+  const [items, setItems] = useState<HomeItem[] | null>(() => cachedRead<HomeItem[]>(cacheKey));
+  const [error, setError] = useState<string | null>(null);
+  // Until someone picks a tile, open the most urgent group that has anything.
+  const [picked, setGroup] = useSticky<HomeGroup | null>("home-group", null);
+  const load = useCallback(() => {
+    rpc.call("homeDashboard", { project: scoped }).then(
+      (result) => {
+        cachedWrite(cacheKey, result.items);
+        setItems(result.items);
+        setError(null);
+      },
+      (err: unknown) => setError(errorText(err)),
+    );
+  }, [rpc, scoped, cacheKey]);
+  useEffect(() => {
+    if (status === null) return;
+    load();
+  }, [load, status === null]); // eslint-disable-line react-hooks/exhaustive-deps
+  useRealtime("data-changed", load);
+
+  if (items === null) return error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />;
+  const count = (id: HomeGroup) => items.filter((item) => item.group === id).length;
+  const group: HomeGroup = picked ?? HOME_GROUPS.find((entry) => count(entry.id) > 0)?.id ?? "action";
+  const shown = items.filter((item) => item.group === group);
+  const current = HOME_GROUPS.find((entry) => entry.id === group) ?? HOME_GROUPS[0];
+  const open = (item: HomeItem) =>
+    navigate.toPluginPanel(PANEL_PATH, {
+      subPath: routeToSubPath({ view: "merge_request", project: item.project, iid: item.iid }),
+    });
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="tablist" aria-label="Merge request groups">
+        {HOME_GROUPS.map((entry) => {
+          const n = count(entry.id);
+          const on = entry.id === group;
+          return (
+            <button
+              key={entry.id}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => setGroup(entry.id)}
+              className={cn(
+                "flex min-w-0 flex-col items-start rounded-[10px] px-3 py-2.5 text-left transition-colors",
+                on
+                  ? "bg-[rgba(35,131,226,.1)] shadow-[inset_0_0_0_2px_rgb(35,131,226)]"
+                  : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
+              )}
+            >
+              <span className="w-full truncate text-[12.5px] text-muted-foreground">
+                {entry.emoji} {entry.label}
+              </span>
+              <span className={cn("text-2xl font-bold leading-tight", n === 0 ? "text-muted-foreground/60" : "text-foreground")}>
+                {n}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {error !== null ? <p className="text-xs text-muted-foreground">⚠️ {error} · showing the last loaded list</p> : null}
+      <div className="flex flex-col">
+        {shown.length === 0 ? (
+          <p className="px-2 py-3 text-sm text-muted-foreground">{current.empty}</p>
+        ) : (
+          shown.slice(0, 12).map((item) => {
+            const reason = dashboardReason(item);
+            const busy = spawningKey === linkKey("mr", item.project, item.iid);
+            return (
+              <div
+                key={`${item.project}!${item.iid}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => open(item)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") open(item);
+                }}
+                className="group relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 outline-none transition-colors hover:bg-state-hover focus-visible:bg-state-hover"
+              >
+                <span className="shrink-0 text-[13px] text-muted-foreground">!{item.iid}</span>
+                <span className="min-w-0 flex-1 truncate text-sm text-foreground" title={item.title}>
+                  {item.title}
+                </span>
+                <span className={cn("hidden h-5 shrink-0 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[12.5px] sm:inline-flex", HOME_TONE[reason.tone])}>
+                  {reason.text}
+                </span>
+                <Avatar username={item.author} size={18} />
+                <span className="w-9 shrink-0 text-right text-[12.5px] text-muted-foreground/70" title={formatDateTime(item.updatedAt)}>
+                  {relativeTime(item.updatedAt).replace(" ago", "")}
+                </span>
+                <span className="absolute right-1.5 flex gap-0.5 rounded-md bg-background opacity-0 shadow-[0_0_0_1px_var(--border)] transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                  <button
+                    type="button"
+                    className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      open(item);
+                    }}
+                  >
+                    Open
+                  </button>
+                  <button
+                    type="button"
+                    disabled={spawningKey !== null}
+                    className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50"
+                    title="Review with an agent"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      spawn("mr", item.project, item.iid);
+                    }}
+                  >
+                    {busy ? "…" : "⚡ Agent"}
+                  </button>
+                </span>
+              </div>
+            );
+          })
+        )}
+        {shown.length > 12 ? (
+          <p className="px-2 pt-1 text-xs text-muted-foreground">and {shown.length - 12} more in the GitLab panel</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "gitlab-ui",
@@ -6242,11 +6412,11 @@ export default definePluginApp((app) => {
     headerContent: PanelHeader,
   });
   app.slots.homepageSection({
-    id: "gitlab-ui-issues",
-    title: "GitLab issues",
+    id: "gitlab-ui-dashboard",
+    title: "🦊 GitLab",
     component: (props: PluginHomepageSectionProps) => (
       <ViewerScope>
-        <RecentIssuesSection {...props} />
+        <HomeDashboard {...props} />
       </ViewerScope>
     ),
   });

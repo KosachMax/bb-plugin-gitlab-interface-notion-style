@@ -21,6 +21,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { explainMergeFailure, mergeAllowance, mergeQuery } from "./lib/merge";
+import { groupOwnMergeRequest } from "./lib/dashboard";
 import { classifyPromotion, normalizedPatch, type PromotionCommit } from "./lib/promotion";
 import {
   classifyJobStatus,
@@ -500,6 +501,30 @@ export const gitlabRpcContract = defineRpcContract({
               body: z.string(),
               author: z.string(),
               createdAt: z.string(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
+  /** Open merge requests that want something from the viewer, for the new-thread page. */
+  homeDashboard: {
+    input: z.object({ project: projectRefSchema.nullable() }).strict(),
+    output: z
+      .object({
+        fetchedAt: z.string(),
+        items: z.array(
+          z
+            .object({
+              group: z.enum(["action", "ready", "review", "waiting"]),
+              project: z.string(),
+              iid: z.number().int(),
+              title: z.string(),
+              author: z.string(),
+              draft: z.boolean(),
+              status: z.string(),
+              updatedAt: z.string(),
+              url: z.string(),
             })
             .strict(),
         ),
@@ -2946,6 +2971,72 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }),
       };
+    },
+
+    /** { project } → the viewer's merge requests grouped by what they need. */
+    async homeDashboard({ project }) {
+      const projects = (await discoverProjects())
+        .map((entry) => entry.project)
+        .filter((entry) => project === null || entry === project);
+      const { assigneesReview } = await settings.get();
+      const row = z
+        .object({
+          iid: z.number().int(),
+          title: z.string(),
+          draft: z.boolean().catch(false),
+          detailed_merge_status: z.string().catch(""),
+          updated_at: z.string().catch(""),
+          web_url: z.string().catch(""),
+          author: z.object({ username: z.string() }).passthrough(),
+        })
+        .passthrough();
+      type Row = z.infer<typeof row>;
+      const items: Array<{
+        group: "action" | "ready" | "review" | "waiting";
+        project: string;
+        iid: number;
+        title: string;
+        author: string;
+        draft: boolean;
+        status: string;
+        updatedAt: string;
+        url: string;
+      }> = [];
+      await Promise.all(
+        projects.map(async (ref) => {
+          const viewer = await getViewer(parseProjectRef(ref).host);
+          const base = `${projectApiBase(ref)}/merge_requests?state=opened&per_page=100`;
+          const read = async (query: string): Promise<Row[]> =>
+            z.array(row).catch([]).parse(await gitlabApi(ref, `${base}&${query}`).catch(() => []));
+          const [mine, reviewing, assigned] = await Promise.all([
+            read(`author_username=${encodeURIComponent(viewer)}`),
+            read(`reviewer_username=${encodeURIComponent(viewer)}`),
+            assigneesReview ? read(`assignee_username=${encodeURIComponent(viewer)}`) : Promise.resolve([]),
+          ]);
+          const toItem = (mr: Row, group: (typeof items)[number]["group"]) => ({
+            group,
+            project: ref,
+            iid: mr.iid,
+            title: mr.title,
+            author: mr.author.username,
+            draft: mr.draft,
+            status: mr.detailed_merge_status,
+            updatedAt: mr.updated_at,
+            url: mr.web_url,
+          });
+          for (const mr of mine) {
+            items.push(toItem(mr, groupOwnMergeRequest({ author: viewer, draft: mr.draft, status: mr.detailed_merge_status })));
+          }
+          const seen = new Set<number>();
+          for (const mr of [...reviewing, ...assigned]) {
+            if (seen.has(mr.iid) || mr.draft || mr.author.username.toLowerCase() === viewer.toLowerCase()) continue;
+            seen.add(mr.iid);
+            items.push(toItem(mr, "review"));
+          }
+        }),
+      );
+      items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+      return { fetchedAt: new Date().toISOString(), items };
     },
 
     /** { project, iid, shas } → a thread that explains and reviews those commits. */
