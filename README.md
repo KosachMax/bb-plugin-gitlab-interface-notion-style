@@ -84,6 +84,7 @@ Open BB → Settings → Plugins → GitLab Interface (Notion style).
 | New-thread dashboard: groups and order | `action,ready,review,waiting` | Any of `action`, `ready`, `review`, `waiting`, `drafts`, `issues`, in display order. |
 | New-thread dashboard: rows per group | `8` | 3, 5, 8, 12 or 20. |
 | New-thread dashboard: hide empty groups | off | Drop groups with nothing in them. |
+| New-thread page: composer at the bottom | off | Pins the message box to the bottom of the New thread page and centres the dashboard above it. |
 | New-thread dashboard: groups collapsed by default | `waiting` | Sections layout only. |
 | Extra projects / Default GitLab host / Default BB project | | See "Which projects are tracked". |
 

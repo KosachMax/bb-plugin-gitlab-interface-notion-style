@@ -301,6 +301,7 @@ export const gitlabRpcContract = defineRpcContract({
         homeRows: z.number().int(),
         homeHideEmpty: z.boolean(),
         homeCollapsed: z.array(z.string()),
+        homeComposerAtBottom: z.boolean(),
       })
       .strict(),
   },
@@ -1676,6 +1677,12 @@ export default async function plugin(bb: BbPluginApi) {
     homeHideEmpty: {
       type: "boolean",
       label: "New-thread dashboard: hide empty groups",
+      default: false,
+    },
+    homeComposerAtBottom: {
+      type: "boolean",
+      label: "New-thread page: composer at the bottom",
+      description: "Pins the message box to the bottom of the New thread page and centres the dashboard above it, so the pointer travels less.",
       default: false,
     },
     homeCollapsed: {
@@ -3286,6 +3293,7 @@ export default async function plugin(bb: BbPluginApi) {
         homeRows: Number(current.homeRows) || 8,
         homeHideEmpty: current.homeHideEmpty,
         homeCollapsed: listSetting(current.homeCollapsed),
+        homeComposerAtBottom: current.homeComposerAtBottom,
       };
     },
 

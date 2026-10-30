@@ -566,6 +566,7 @@ interface UiSettings {
   homeRows: number;
   homeHideEmpty: boolean;
   homeCollapsed: string[];
+  homeComposerAtBottom: boolean;
 }
 let uiSettings: UiSettings = {
   promotionBranch: "",
@@ -577,6 +578,7 @@ let uiSettings: UiSettings = {
   homeRows: 8,
   homeHideEmpty: false,
   homeCollapsed: ["waiting"],
+  homeComposerAtBottom: false,
 };
 let uiSettingsLoaded = false;
 
@@ -6296,11 +6298,35 @@ const HOME_TONE: Record<string, string> = {
   neutral: "bg-foreground/[0.07] text-muted-foreground",
 };
 
+/**
+ * Moves the New thread composer to the bottom of the page and centres what is
+ * above it. bb draws that page; these selectors are its stable test ids, and
+ * the style lives only while the dashboard is mounted with the setting on.
+ */
+const COMPOSER_AT_BOTTOM_CSS = `
+[data-testid="root-compose-compact-home"] { min-height: 100%; padding-top: 24px; }
+[data-testid="root-compose-compact-home"] > [data-testid="plugin-homepage-sections"] { order: 1; margin-block: auto; padding-bottom: 24px; }
+[data-testid="root-compose-compact-home"] > [data-testid="root-compose-compact-composer"] {
+  order: 2; position: sticky; bottom: 0; z-index: 5; padding-bottom: 16px; background: var(--background);
+}`;
+
+function useComposerAtBottom(on: boolean) {
+  useEffect(() => {
+    if (!on) return;
+    const style = document.createElement("style");
+    style.dataset.gitlabUi = "composer-at-bottom";
+    style.textContent = COMPOSER_AT_BOTTOM_CSS;
+    document.head.appendChild(style);
+    return () => style.remove();
+  }, [on]);
+}
+
 function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const navigate = useBbNavigate();
   const status = useStatus();
   const settings = useUiSettings();
+  useComposerAtBottom(settings.homeComposerAtBottom);
   const viewer = useViewer();
   const { spawn, spawningKey } = useSpawn();
   const scoped =
