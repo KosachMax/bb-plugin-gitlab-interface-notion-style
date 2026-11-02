@@ -114,8 +114,10 @@ const syncResultSchema = z
   .strict();
 const okResultSchema = z.object({ ok: z.literal(true) }).strict();
 const noteSchema = z
-  .object({ author: z.string(), body: z.string(), createdAt: z.string() })
+  .object({ id: z.number().int().nonnegative(), author: z.string(), body: z.string(), createdAt: z.string() })
   .strict();
+const reactionListSchema = z
+  .array(z.object({ name: z.string().min(1), users: z.array(z.string()) }).strict());
 const threadLinkSchema = z
   .object({
     kind: z.enum(["issue", "mr"]),
@@ -555,6 +557,24 @@ export const gitlabRpcContract = defineRpcContract({
       .strict(),
     output: z.object({ threadId: z.string().min(1) }).strict(),
   },
+  /** Emoji reactions on comments, for the notes on screen (one GitLab call per note). */
+  getNoteReactions: {
+    input: itemInputSchema
+      .extend({ noteIds: z.array(z.number().int().positive()).min(1).max(80) })
+      .strict(),
+    output: z.object({ reactions: z.record(z.string(), reactionListSchema) }).strict(),
+  },
+  /** Add or remove the signed-in user's reaction on the merge request (noteId null) or on a comment. */
+  setReaction: {
+    input: itemInputSchema
+      .extend({
+        noteId: z.number().int().positive().nullable(),
+        name: z.string().regex(/^[a-z0-9_+-]{1,64}$/),
+        on: z.boolean(),
+      })
+      .strict(),
+    output: z.object({ reactions: reactionListSchema }).strict(),
+  },
   /** Approve a merge request (pinned to the commit the person reviewed) or take the approval back. */
   setMergeRequestApproval: {
     input: itemInputSchema
@@ -708,6 +728,7 @@ const gitlabMergeRequestRowSchema = gitlabItemRowSchema.extend({
     .catch(null),
 });
 const gitlabNoteRowSchema = z.looseObject({
+  id: z.number().int().nonnegative().catch(0),
   body: z.string().catch(""),
   system: z.boolean().catch(false),
   created_at: z.string().catch(""),
@@ -742,6 +763,20 @@ const gitlabAwardListSchema = z
     }),
   )
   .catch([]);
+/** Awards grouped by emoji, oldest first, one entry per person. */
+function groupAwards(
+  awards: ReadonlyArray<{ name: string; user?: { username: string } | null }>,
+): Array<{ name: string; users: string[] }> {
+  const byName = new Map<string, string[]>();
+  for (const award of awards) {
+    const username = award.user?.username ?? "";
+    if (award.name.length === 0 || username.length === 0) continue;
+    const users = byName.get(award.name) ?? [];
+    if (!users.includes(username)) users.push(username);
+    byName.set(award.name, users);
+  }
+  return [...byName].map(([name, users]) => ({ name, users }));
+}
 const gitlabDiffListSchema = z
   .array(
     z.looseObject({
@@ -963,6 +998,8 @@ interface CachedItem {
 }
 
 interface Note {
+  /** GitLab note id. */
+  id: number;
   author: string;
   body: string;
   createdAt: string;
@@ -980,7 +1017,7 @@ interface ThreadLink {
 type GitlabApi = (
   project: string,
   endpoint: string,
-  options?: { method?: "POST" | "PUT"; fields?: Record<string, string> },
+  options?: { method?: "POST" | "PUT" | "DELETE"; fields?: Record<string, string> },
 ) => Promise<unknown>;
 
 function needsConfiguration(message: string): Error {
@@ -2446,6 +2483,7 @@ export default async function plugin(bb: BbPluginApi) {
       .parse(raw)
       .filter((row) => !row.system && row.body.trim().length > 0)
       .map((row) => ({
+        id: row.id,
         author: row.author?.username ?? "",
         body: row.body,
         createdAt: row.created_at,
@@ -2710,6 +2748,7 @@ export default async function plugin(bb: BbPluginApi) {
         const notes = discussion.notes
           .filter((note) => !note.system && note.body.trim().length > 0)
           .map((note) => ({
+            id: note.id,
             author: note.author?.username ?? "",
             body: note.body,
             createdAt: note.created_at,
@@ -2729,18 +2768,7 @@ export default async function plugin(bb: BbPluginApi) {
         });
       }
 
-      const reactionsByName = new Map<string, string[]>();
-      for (const award of gitlabAwardListSchema.parse(awardsRaw)) {
-        const username = award.user?.username ?? "";
-        if (award.name.length === 0 || username.length === 0) continue;
-        const users = reactionsByName.get(award.name) ?? [];
-        if (!users.includes(username)) users.push(username);
-        reactionsByName.set(award.name, users);
-      }
-      const reactions = [...reactionsByName].map(([name, users]) => ({
-        name,
-        users,
-      }));
+      const reactions = groupAwards(gitlabAwardListSchema.parse(awardsRaw));
 
       const approvals = gitlabApprovalsSchema.parse(approvalsRaw);
       const changesCount = Number.parseInt(String(detail.changes_count), 10);
@@ -3275,6 +3303,50 @@ export default async function plugin(bb: BbPluginApi) {
       await addLink({ kind: "mr", project, iid, threadId: thread.id, createdAt: new Date().toISOString() });
       bb.log.info(`spawned cherry-pick thread ${thread.id} for ${ref} → ${target}`);
       return { threadId: thread.id };
+    },
+
+    /** { project, iid, noteIds } → the reactions on each of those comments. */
+    async getNoteReactions({ project, iid, noteIds }) {
+      const base = `${projectApiBase(project)}/merge_requests/${iid}`;
+      const reactions: Record<string, Array<{ name: string; users: string[] }>> = {};
+      const queue = [...new Set(noteIds)];
+      await Promise.all(
+        Array.from({ length: 6 }, async () => {
+          for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+            const raw = await gitlabApi(project, `${base}/notes/${id}/award_emoji?per_page=100`).catch(() => []);
+            reactions[String(id)] = groupAwards(gitlabAwardListSchema.parse(raw));
+          }
+        }),
+      );
+      return { reactions };
+    },
+
+    /**
+     * { project, iid, noteId, name, on } → react or take the reaction back as
+     * the signed-in user, then return that target's reactions. GitLab removes
+     * an award by its id, so the person's own award is looked up first.
+     */
+    async setReaction({ project, iid, noteId, name, on }) {
+      const base = `${projectApiBase(project)}/merge_requests/${iid}`;
+      const awards = noteId === null ? `${base}/award_emoji` : `${base}/notes/${noteId}/award_emoji`;
+      if (on) {
+        try {
+          await gitlabApi(project, `${awards}?name=${encodeURIComponent(name)}`, { method: "POST" });
+        } catch (error) {
+          // 404 on a duplicate award: it is already there, which is what was asked for.
+          if (!/\b404\b|\b400\b/.test(error instanceof Error ? error.message : String(error))) throw error;
+        }
+      } else {
+        const me = (await getViewer(parseProjectRef(project).host)).toLowerCase();
+        const mine = z
+          .array(z.looseObject({ id: z.number().int(), name: z.string().catch(""), user: gitlabUserRowSchema.nullish().catch(null) }))
+          .catch([])
+          .parse(await gitlabApi(project, `${awards}?per_page=100`).catch(() => []))
+          .find((award) => award.name === name && award.user?.username.toLowerCase() === me);
+        if (mine !== undefined) await gitlabApi(project, `${awards}/${mine.id}`, { method: "DELETE" });
+      }
+      const raw = await gitlabApi(project, `${awards}?per_page=100`).catch(() => []);
+      return { reactions: groupAwards(gitlabAwardListSchema.parse(raw)) };
     },
 
     /**

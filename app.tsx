@@ -100,6 +100,7 @@ import {
 import { cn } from "@/lib/utils";
 import { mergeAllowance } from "@/lib/merge";
 import { dashboardReason } from "@/lib/dashboard";
+import { barEntries, glyphFor, searchEmoji, withReaction } from "@/lib/reactions";
 import {
   emojiFor,
   reviewVerdict,
@@ -160,6 +161,7 @@ interface Item {
 }
 
 interface Note {
+  id: number;
   author: string;
   body: string;
   createdAt: string;
@@ -3825,11 +3827,15 @@ function ThreadCard({
   iid,
   discussion,
   onChanged,
+  noteReactions,
+  onReact,
 }: {
   project: string;
   iid: number;
   discussion: Discussion;
   onChanged: () => void;
+  noteReactions?: Record<string, Reaction[]>;
+  onReact?: (noteId: number | null, name: string, on: boolean) => void;
 }) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const [replying, setReplying] = useState(false);
@@ -3902,7 +3908,18 @@ function ThreadCard({
         </p>
       ) : null}
       {discussion.notes.map((note, index) => (
-        <CommentItem key={`${note.createdAt}-${index}`} note={note} />
+        <div key={`${note.createdAt}-${index}`}>
+          <CommentItem note={note} />
+          {onReact !== undefined && note.id > 0 ? (
+            <ReactionBar
+              reactions={noteReactions?.[String(note.id)] ?? []}
+              fixed={false}
+              small
+              className="pb-1 pl-8"
+              onToggle={(name, on) => onReact(note.id, name, on)}
+            />
+          ) : null}
+        </div>
       ))}
       <div className="flex items-start gap-2 pb-1 pt-1">
         {replying ? (
@@ -4394,7 +4411,133 @@ function ApprovalBadge({ via }: { via: "approval" | "reaction" | null }) {
  * Who has reviewed, right under the title: formal approvals, thumbs-up
  * approvals, and anyone who objected, plus reviewers still to answer.
  */
-function ReviewLine({ mr }: { mr: MergeRequestDetail }) {
+/**
+ * GitLab's reaction bar in Notion's shape: pills with a count, yours in blue,
+ * names on hover, and a picker for any other emoji. `fixed` keeps 👍 and 👎
+ * on the bar even at zero (the merge request); a comment shows only what is
+ * in use plus the picker.
+ */
+function ReactionBar({
+  reactions,
+  fixed,
+  small = false,
+  onToggle,
+  className,
+}: {
+  reactions: readonly Reaction[];
+  fixed: boolean;
+  small?: boolean;
+  onToggle: (name: string, on: boolean) => void;
+  className?: string;
+}) {
+  const viewer = useViewer();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const entries = barEntries(reactions, viewer, fixed);
+  const pill = small ? "h-6 px-[7px] text-[13px]" : "h-7 px-[9px] text-sm";
+  const names = (users: string[], mine: boolean) => {
+    const others = users.filter((name) => name.toLowerCase() !== viewer?.toLowerCase());
+    const shown = others.slice(0, 6);
+    const extra = others.length - shown.length;
+    return [...shown, ...(extra > 0 ? [`${extra} more`] : []), ...(mine ? ["you"] : [])].join(", ");
+  };
+  return (
+    <div className={cn("flex flex-wrap items-center gap-1.5", className)} role="group" aria-label="Reactions">
+      {entries.map((entry) => (
+        <button
+          key={entry.name}
+          type="button"
+          aria-pressed={entry.mine}
+          disabled={viewer === null}
+          title={entry.users.length > 0 ? `${names(entry.users, entry.mine)} · :${entry.name}:` : `React with :${entry.name}:`}
+          onClick={() => onToggle(entry.name, !entry.mine)}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full transition-colors disabled:opacity-60",
+            pill,
+            entry.mine
+              ? "bg-[rgba(35,131,226,.1)] text-[rgb(35,131,226)] shadow-[inset_0_0_0_1px_rgba(35,131,226,.55)] hover:bg-[rgba(35,131,226,.16)]"
+              : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
+            entry.users.length === 0 && "text-muted-foreground/60",
+          )}
+        >
+          <span aria-hidden="true" className={cn(entry.users.length === 0 && "opacity-55 grayscale")}>{glyphFor(entry.name)}</span>
+          <span className="tabular-nums">{entry.users.length}</span>
+        </button>
+      ))}
+      <DropdownMenu open={open} onOpenChange={(next) => { setOpen(next); if (!next) setQuery(""); }}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Add reaction"
+            title="Add reaction"
+            disabled={viewer === null}
+            className={cn(
+              "inline-flex items-center justify-center rounded-full text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-60",
+              small ? "size-6" : "size-7",
+            )}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.5" />
+              <path d="M5.5 9.5c.6 1 1.4 1.5 2.5 1.5s1.9-.5 2.5-1.5" strokeLinecap="round" />
+              <circle cx="5.8" cy="6.4" r=".6" fill="currentColor" stroke="none" />
+              <circle cx="10.2" cy="6.4" r=".6" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-[290px] p-2" onKeyDown={(event) => event.stopPropagation()}>
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") {
+                const first = searchEmoji(query)[0];
+                if (first !== undefined) {
+                  onToggle(first.name, !entries.some((entry) => entry.name === first.name && entry.mine));
+                  setOpen(false);
+                }
+              }
+            }}
+            placeholder="Search emoji…"
+            aria-label="Search emoji"
+            className="mb-1.5 h-7 w-full rounded bg-foreground/[0.04] px-2 text-sm shadow-[inset_0_0_0_1px_var(--border)] outline-none placeholder:text-muted-foreground focus:shadow-[inset_0_0_0_1px_rgba(35,131,226,.57),0_0_0_2px_rgba(35,131,226,.35)]"
+          />
+          <div className="px-1 pb-1 text-xs font-medium text-muted-foreground">{query === "" ? "Frequently used" : "Results"}</div>
+          <div className="grid grid-cols-8 gap-0.5">
+            {searchEmoji(query).map((choice) => {
+              const mine = entries.some((entry) => entry.name === choice.name && entry.mine);
+              return (
+                <button
+                  key={choice.name}
+                  type="button"
+                  title={`:${choice.name}:`}
+                  aria-label={choice.name}
+                  onClick={() => {
+                    onToggle(choice.name, !mine);
+                    setOpen(false);
+                  }}
+                  className={cn("h-8 rounded text-[19px] transition-colors hover:bg-state-hover", mine && "bg-[rgba(35,131,226,.1)]")}
+                >
+                  {choice.glyph}
+                </button>
+              );
+            })}
+          </div>
+          {searchEmoji(query).length === 0 ? <p className="px-1 py-2 text-sm text-muted-foreground">No emoji match “{query}”.</p> : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+function ReviewLine({
+  mr,
+  onReact,
+}: {
+  mr: MergeRequestDetail;
+  onReact: (name: string, on: boolean) => void;
+}) {
   const verdict = reviewVerdict({
     author: mr.author,
     approvedBy: mr.approvedBy,
@@ -4441,16 +4584,7 @@ function ReviewLine({ mr }: { mr: MergeRequestDetail }) {
         <span className="text-sm text-muted-foreground">No reviewers assigned yet</span>
       ) : null}
       <span className="flex-1" />
-      {mr.reactions.map((reaction) => (
-        <span
-          key={reaction.name}
-          title={`${reaction.name}: ${reaction.users.join(", ")}`}
-          className="inline-flex h-6 items-center gap-1 rounded-full border border-border px-2 text-sm"
-        >
-          <span aria-hidden="true">{emojiFor(reaction.name)}</span>
-          {reaction.users.length}
-        </span>
-      ))}
+      <ReactionBar reactions={mr.reactions} fixed small onToggle={onReact} />
     </div>
   );
 }
@@ -5358,6 +5492,57 @@ function MergeRequestDetailView({
   // build the payload from (see the issue page).
   const mrRef = useRef<MrCore | null>(null);
   mrRef.current = mrState;
+  // Reactions: the merge request's own come with the page; each comment's are
+  // fetched for the comments on screen. A click shows at once and is undone if
+  // GitLab refuses.
+  const viewerName = useViewer();
+  const [noteReactions, setNoteReactions] = useState<Record<string, Reaction[]>>({});
+  const noteIds = (mrState?.discussions ?? [])
+    .flatMap((discussion) => discussion.notes.map((note) => note.id))
+    .filter((id) => id > 0)
+    .slice(0, 80);
+  const noteKey = noteIds.join(",");
+  useEffect(() => {
+    if (noteIds.length === 0) return;
+    let live = true;
+    rpc.call("getNoteReactions", { project, iid, noteIds }).then(
+      (result) => {
+        if (live) setNoteReactions(result.reactions);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [rpc, project, iid, noteKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const react = useCallback(
+    (noteId: number | null, name: string, on: boolean) => {
+      if (viewerName === null) return;
+      const current = mrRef.current;
+      const before = noteId === null ? current?.reactions ?? [] : noteReactions[String(noteId)] ?? [];
+      const optimistic = withReaction(before, name, viewerName, on);
+      const put = (value: Reaction[]) => {
+        if (noteId === null) {
+          const latest = mrRef.current;
+          if (latest !== null) {
+            mrRef.current = { ...latest, reactions: value };
+            setMr(mrRef.current);
+          }
+        } else {
+          setNoteReactions((prev) => ({ ...prev, [String(noteId)]: value }));
+        }
+      };
+      put(optimistic);
+      rpc.call("setReaction", { project, iid, noteId, name, on }).then(
+        (result) => put(result.reactions),
+        (err: unknown) => {
+          put(before);
+          toast.error(errorText(err));
+        },
+      );
+    },
+    [rpc, project, iid, viewerName, noteReactions],
+  );
   const togglePerson = useCallback(
     (field: "assignees" | "reviewers", username: string, on: boolean) => {
       const current = mrRef.current;
@@ -5502,7 +5687,7 @@ function MergeRequestDetailView({
             <PromotionCell promo={promo} onClick={() => setTab("commits")} />
           ) : null}
         </div>
-        <ReviewLine mr={mr} />
+        <ReviewLine mr={mr} onReact={(name, on) => react(null, name, on)} />
         <div className="flex flex-wrap items-center gap-2 pb-4 pt-0">
           {mr.state !== "opened" ? (
             <span className="text-sm text-muted-foreground">
@@ -5619,6 +5804,12 @@ function MergeRequestDetailView({
                   <Clamp>
                     <PageBody16 body={mr.body} />
                   </Clamp>
+                  <ReactionBar
+                    reactions={mr.reactions}
+                    fixed
+                    className="pt-2"
+                    onToggle={(name, on) => react(null, name, on)}
+                  />
                 </section>
                 {unresolved.length > 0 ? (
                   <section className="flex flex-col gap-2">
@@ -5636,6 +5827,8 @@ function MergeRequestDetailView({
                           iid={iid}
                           discussion={discussion}
                           onChanged={load}
+                          noteReactions={noteReactions}
+                          onReact={react}
                         />
                       ))}
                     </div>
@@ -5682,6 +5875,8 @@ function MergeRequestDetailView({
                           iid={iid}
                           discussion={discussion}
                           onChanged={load}
+                          noteReactions={noteReactions}
+                          onReact={react}
                         />
                       ))}
                   </div>

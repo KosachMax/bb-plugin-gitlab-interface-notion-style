@@ -47,6 +47,10 @@ Screenshots use invented demo data.
 - **Approve from the panel.** An Approve button next to Merge on merge requests
   you did not author, pinned to the commit on screen (GitLab refuses if the
   branch moved). It turns into Unapprove once you approved.
+- **Reactions like GitLab's.** 👍 and 👎 with counts above the description and
+  next to Approve, a picker for any other emoji, and a bar under every comment.
+  Your reactions are blue, names show on hover, and a click is undone if
+  GitLab refuses it.
 - **Merge from the panel.** A Merge button on every open merge request, with a
   confirmation that shows the exact branches and commit, options for squash,
   deleting the branch, and "merge when the pipeline succeeds". Anything not
