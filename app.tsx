@@ -6663,6 +6663,104 @@ function ContributionTooltip({ date, day, anchor }: { date: string; day: Contrib
   );
 }
 
+/** Every yyyy-mm-dd from `from` to `to`, inclusive. */
+function dayKeysBetween(from: string, to: string): string[] {
+  const keys: string[] = [];
+  const cursor = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  while (cursor <= end) {
+    keys.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return keys;
+}
+
+function shiftDayKey(key: string, days: number): string {
+  const date = new Date(`${key}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Monday 0 … Sunday 6. */
+function weekdayIndex(key: string): number {
+  return (new Date(`${key}T00:00:00Z`).getUTCDay() + 6) % 7;
+}
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+
+/**
+ * Week and Month views: big day tiles instead of the year's tiny squares.
+ * Week is the last seven days in a row; Month is a Monday-first calendar of
+ * the last thirty days. Same colors and the same hover card as the year.
+ */
+function ContributionDays({ mode, startKey, endDate, days }: {
+  mode: "week" | "month";
+  startKey: string;
+  endDate: string;
+  days: ContributionCalendarData["days"];
+}) {
+  const byDate = useMemo(() => new Map(days.map((day) => [day.date, day])), [days]);
+  const [hover, setHover] = useState<{ date: string; anchor: DOMRect } | null>(null);
+  const tile = (key: string, inPeriod: boolean, big: boolean) => {
+    if (!inPeriod) return <span key={key} aria-hidden="true" />;
+    const day = byDate.get(key);
+    const count = day?.count ?? 0;
+    const level = contributionLevel(count);
+    const date = new Date(`${key}T00:00:00Z`);
+    return (
+      <span
+        key={key}
+        aria-label={`${formatDayKey(key)}: ${count} commit${count === 1 ? "" : "s"}`}
+        onMouseEnter={(event) => setHover({ date: key, anchor: event.currentTarget.getBoundingClientRect() })}
+        className={cn(
+          "flex min-w-0 flex-col justify-between rounded-md px-2 py-1.5 transition-shadow",
+          big ? "h-[76px]" : "h-12",
+          CONTRIBUTION_LEVELS[level],
+          level >= 3 ? "text-white" : "text-foreground",
+          key === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background",
+          hover?.date === key && "outline outline-[1.5px] outline-offset-1 outline-foreground",
+        )}
+      >
+        <span className={cn("truncate text-xs", level >= 3 ? "text-white/80" : "text-muted-foreground")}>
+          {big
+            ? date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" })
+            : date.getUTCDate() === 1 || key === startKey
+              ? date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
+              : date.getUTCDate()}
+        </span>
+        {count > 0 ? (
+          <span className={cn("font-semibold tabular-nums", big ? "text-lg leading-6" : "text-sm leading-5")}>
+            {count}
+            {big ? <span className="pl-1 text-xs font-normal">commit{count === 1 ? "" : "s"}</span> : null}
+          </span>
+        ) : null}
+      </span>
+    );
+  };
+
+  let cells: React.ReactNode;
+  if (mode === "week") {
+    cells = <div className="grid grid-cols-7 gap-1.5">{dayKeysBetween(startKey, endDate).map((key) => tile(key, true, true))}</div>;
+  } else {
+    const first = shiftDayKey(startKey, -weekdayIndex(startKey));
+    const last = shiftDayKey(endDate, 6 - weekdayIndex(endDate));
+    cells = (
+      <div className="grid grid-cols-7 gap-1.5">
+        {WEEKDAYS.map((name) => (
+          <span key={name} className="px-2 text-xs text-muted-foreground">{name}</span>
+        ))}
+        {dayKeysBetween(first, last).map((key) => tile(key, key >= startKey && key <= endDate, false))}
+      </div>
+    );
+  }
+  return (
+    <div className="min-w-0 max-w-[800px]" onMouseLeave={() => setHover(null)}>
+      {cells}
+      {hover !== null ? <ContributionTooltip date={hover.date} day={byDate.get(hover.date)} anchor={hover.anchor} /> : null}
+    </div>
+  );
+}
+
 function ContributionGrid({ weeks, endDate, days }: {
   weeks: Array<Array<{ date: string; count: number; inRange: boolean }>>;
   endDate: string;
@@ -6820,7 +6918,11 @@ function ContributionSummary({
           </div>
         ))}
       </div>
-      <ContributionGrid weeks={weeks} endDate={data.endDate} days={data.days} />
+      {chosen.id === "year" ? (
+        <ContributionGrid weeks={weeks} endDate={data.endDate} days={data.days} />
+      ) : (
+        <ContributionDays mode={chosen.id} startKey={startKey} endDate={data.endDate} days={data.days} />
+      )}
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>
           {error

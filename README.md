@@ -9,17 +9,22 @@ A Notion-style panel for GitLab, with a `bb gitlab-ui` CLI for agents and termin
 
 ![Merge request page](docs/screenshots/merge-request.png)
 
-| Merge requests | Failed pipeline | Branches |
+| New-thread dashboard | Cherry-pick tracking | Failed pipeline |
 |---|---|---|
-| ![Merge requests](docs/screenshots/merge-requests.png) | ![Pipeline](docs/screenshots/pipeline.png) | ![Branches](docs/screenshots/branches.png) |
+| ![Home dashboard](docs/screenshots/home.png) | ![Cherry-picks](docs/screenshots/cherry-picks.png) | ![Pipeline](docs/screenshots/pipeline.png) |
+
+| Merge requests | Branches |
+|---|---|
+| ![Merge requests](docs/screenshots/merge-requests.png) | ![Branches](docs/screenshots/branches.png) |
 
 Screenshots use invented demo data.
 
 ## Features
 
 - **Your commits above the dashboard.** A Week / Month / Year switch shows how
-  many commits you authored, lines added and removed, and active days, over a
-  12-month heatmap. Only commits whose author is you count (on any branch of
+  many commits you authored, lines added and removed, and active days. Week
+  shows the last seven days as tiles, Month a calendar of the last 30 days,
+  Year a 12-month heatmap; hover a day for its commits, lines and projects. Only commits whose author is you count (on any branch of
   the tracked projects, each SHA once, merge commits skipped), so a rebase
   or a merge of other people's work does not inflate the numbers. Cached for 30 minutes.
 - **🦊 GitLab next action in a thread.** The context row checks local changes,
