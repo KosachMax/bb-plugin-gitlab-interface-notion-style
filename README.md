@@ -44,6 +44,9 @@ Screenshots use invented demo data.
 - **Views and wide tables.** "Review requests" and "Mine" views on merge
   requests, a pinned Name column, an Author column, and column widths you can
   drag (double-click a column edge to reset).
+- **Approve from the panel.** An Approve button next to Merge on merge requests
+  you did not author, pinned to the commit on screen (GitLab refuses if the
+  branch moved). It turns into Unapprove once you approved.
 - **Merge from the panel.** A Merge button on every open merge request, with a
   confirmation that shows the exact branches and commit, options for squash,
   deleting the branch, and "merge when the pipeline succeeds". Anything not

@@ -5153,6 +5153,59 @@ function CommitsTab({
   );
 }
 
+/**
+ * Approve (pinned to the commit on screen) or take the approval back. Shown
+ * to everyone but the author, who cannot approve their own request; GitLab
+ * has the last word on who may approve.
+ */
+function ApproveButton({
+  project,
+  iid,
+  mr,
+  onChanged,
+}: {
+  project: string;
+  iid: number;
+  mr: MergeRequestDetail;
+  onChanged: () => void;
+}) {
+  const rpc = useRpc<typeof gitlabRpcContract>();
+  const viewer = useViewer();
+  const [busy, setBusy] = useState(false);
+  if (viewer === null || mr.state !== "opened") return null;
+  const me = viewer.toLowerCase();
+  if (mr.author.toLowerCase() === me) return null;
+  const approved = mr.approvedBy.some((name) => name.toLowerCase() === me);
+  const change = () => {
+    setBusy(true);
+    rpc
+      .call("setMergeRequestApproval", { project, iid, approved: !approved, sha: mr.headSha })
+      .then(() => {
+        toast.success(approved ? "Approval taken back" : `Approved !${iid}`);
+        onChanged();
+      })
+      .catch((err: unknown) => toast.error(errorText(err)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={change}
+      title={approved ? "You approved this merge request. Click to take it back." : `Approve the commit ${mr.headSha.slice(0, 8)} you are looking at`}
+      className={cn(
+        "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors disabled:opacity-50",
+        approved
+          ? "text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover hover:text-foreground"
+          : "bg-[rgb(35,131,226)] text-white hover:bg-[rgb(0,117,211)]",
+      )}
+    >
+      {busy ? <Spinner /> : <span aria-hidden="true">{approved ? "↩" : "✓"}</span>}
+      {approved ? "Unapprove" : "Approve"}
+    </button>
+  );
+}
+
 /** Merge is red when GitLab will refuse it; hovering says why. */
 function MergeButton({
   mr,
@@ -5477,6 +5530,9 @@ function MergeRequestDetailView({
             >
               Retry failed jobs
             </GhostButton>
+          ) : null}
+          {mr.state === "opened" ? (
+            <ApproveButton project={project} iid={iid} mr={mr} onChanged={load} />
           ) : null}
           {mr.state === "opened" ? (
             mr.mergeScheduled ? (

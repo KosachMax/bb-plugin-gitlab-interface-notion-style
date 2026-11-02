@@ -555,6 +555,17 @@ export const gitlabRpcContract = defineRpcContract({
       .strict(),
     output: z.object({ threadId: z.string().min(1) }).strict(),
   },
+  /** Approve a merge request (pinned to the commit the person reviewed) or take the approval back. */
+  setMergeRequestApproval: {
+    input: itemInputSchema
+      .extend({
+        approved: z.boolean(),
+        /** The head commit the person looked at; GitLab refuses an approval of anything newer. */
+        sha: z.string().min(7).max(64).optional(),
+      })
+      .strict(),
+    output: z.object({ ok: z.literal(true), approvedBy: z.array(z.string()) }).strict(),
+  },
   mergeMergeRequest: {
     input: itemInputSchema
       .extend({
@@ -3264,6 +3275,40 @@ export default async function plugin(bb: BbPluginApi) {
       await addLink({ kind: "mr", project, iid, threadId: thread.id, createdAt: new Date().toISOString() });
       bb.log.info(`spawned cherry-pick thread ${thread.id} for ${ref} → ${target}`);
       return { threadId: thread.id };
+    },
+
+    /**
+     * { project, iid, approved, sha? } → approve or unapprove as the signed-in
+     * GitLab user. The author cannot approve their own request; GitLab says so
+     * and the message is passed on in plain words.
+     */
+    async setMergeRequestApproval({ project, iid, approved, sha }) {
+      const base = `${projectApiBase(project)}/merge_requests/${iid}`;
+      const current = gitlabMergeRequestRowSchema.parse(await gitlabApi(project, base));
+      if (current.state !== "opened") {
+        throw new Error(`This merge request is ${current.state}`);
+      }
+      if (approved && sha !== undefined && current.sha.length > 0 && !current.sha.startsWith(sha) && !sha.startsWith(current.sha)) {
+        throw new Error("The branch has new commits since you opened this page. Refresh and look at them first.");
+      }
+      try {
+        await gitlabApi(project, `${base}/${approved ? "approve" : "unapprove"}`, {
+          method: "POST",
+          ...(approved && sha !== undefined ? { fields: { sha } } : {}),
+        });
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        if (/\b401\b/.test(text)) throw new Error("GitLab did not accept the approval: sign in again with glab.");
+        if (/\b403\b/.test(text) || /\b405\b/.test(text)) {
+          throw new Error(approved
+            ? "GitLab does not let you approve this merge request (you may be its author, or not allowed to approve here)."
+            : "GitLab does not let you take back this approval.");
+        }
+        if (/\b409\b/.test(text)) throw new Error("The branch changed while you were approving. Refresh and look again.");
+        throw error;
+      }
+      const approvals = gitlabApprovalsSchema.parse(await gitlabApi(project, `${base}/approvals`).catch(() => ({})));
+      return { ok: true as const, approvedBy: approvals.approved_by.flatMap((entry) => (entry.user ? [entry.user.username] : [])) };
     },
 
     /**
