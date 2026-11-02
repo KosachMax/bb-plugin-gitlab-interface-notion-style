@@ -51,6 +51,10 @@ Screenshots use invented demo data.
   next to Approve, a picker for any other emoji, and a bar under every comment.
   Your reactions are blue, names show on hover, and a click is undone if
   GitLab refuses it.
+- **Threads like cards.** Each thread is a card with its file, status and a one-line
+  summary. Open threads start expanded and resolved ones folded, and the choice sticks.
+  Resolve sits beside the reply box, and a resolved thread offers Reopen. New comments
+  on a folded thread show as "new".
 - **Merge from the panel.** A Merge button on every open merge request, with a
   confirmation that shows the exact branches and commit, options for squash,
   deleting the branch, and "merge when the pipeline succeeds". Anything not

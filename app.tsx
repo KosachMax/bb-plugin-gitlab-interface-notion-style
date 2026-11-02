@@ -204,6 +204,8 @@ interface Discussion {
   /** A standalone comment rather than a thread. */
   individual: boolean;
   resolvable: boolean;
+  /** Who resolved it; "" when unresolved or unknown. */
+  resolvedBy: string;
   /** "" for a thread that is not attached to a file. */
   path: string;
   line: number | null;
@@ -3856,6 +3858,32 @@ function ThreadCard({
   const [resolving, setResolving] = useState(false);
   const ready = body.trim().length > 0;
 
+  // Open threads start expanded, resolved ones folded. The last choice sticks
+  // per thread; resolving or reopening it puts the default back.
+  const foldKey = `gitlab-ui:thread-fold:${project}!${iid}:${discussion.id}`;
+  const seenKey = `gitlab-ui:thread-seen:${project}!${iid}:${discussion.id}`;
+  const [choice, setChoice] = useState<boolean | null>(() => {
+    const stored = readStored(foldKey);
+    return stored === "open" ? true : stored === "closed" ? false : null;
+  });
+  const expanded = choice ?? !discussion.resolved;
+  const count = discussion.notes.length;
+  const seenStored = readStored(seenKey);
+  // Comments that arrived while the thread was folded show as "new" on its row.
+  const fresh = expanded || seenStored === null ? 0 : Math.max(0, count - Number(seenStored));
+  useEffect(() => {
+    if (expanded || seenStored === null) writeStored(seenKey, String(count));
+  }, [expanded, seenStored, count, seenKey]);
+  const toggle = () => {
+    const next = !expanded;
+    setChoice(next);
+    writeStored(foldKey, next ? "open" : "closed");
+  };
+  const clearChoice = () => {
+    setChoice(null);
+    writeStored(foldKey, "");
+  };
+
   const refresh = () => {
     onChanged();
     // GitLab lists the new note a moment after it accepts it.
@@ -3886,6 +3914,7 @@ function ThreadCard({
       })
       .then(() => {
         toast.success(discussion.resolved ? "Thread reopened" : "Thread resolved");
+        clearChoice();
         refresh();
       })
       .catch((error: unknown) => toast.error(errorText(error)))
@@ -3896,99 +3925,149 @@ function ThreadCard({
     discussion.path.length > 0
       ? `${discussion.path}${discussion.line !== null ? `:${discussion.line}` : ""}`
       : null;
+  // The head line is plain text: bot HTML comments and markdown marks come out.
+  const summary = (discussion.notes[0]?.body ?? "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/[`*_#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const authors = [...new Set(discussion.notes.map((note) => note.author).filter((name) => name.length > 0))];
+  const footerRow = "flex items-center gap-2 border-t border-border/70 py-2.5 pl-11 pr-3";
+
   return (
-    <div
-      className={cn(
-        "flex flex-col",
-        !discussion.individual && "border-l-2 border-border pl-3",
-      )}
-    >
-      {place !== null || discussion.resolvable ? (
-        <p className="flex min-w-0 items-center gap-2 py-1 text-sm">
-          {place !== null ? (
-            <span className="min-w-0 truncate font-mono text-[13px] text-muted-foreground" title={place}>
-              {place}
-            </span>
-          ) : null}
-          {discussion.resolvable ? (
-            discussion.resolved ? (
-              <Tag color="green">Resolved</Tag>
-            ) : (
-              <Tag color="orange">Unresolved</Tag>
-            )
-          ) : null}
-        </p>
-      ) : null}
-      {discussion.notes.map((note, index) => (
-        <div key={`${note.createdAt}-${index}`}>
-          <CommentItem note={note} />
-          {onReact !== undefined && note.id > 0 ? (
-            <ReactionBar
-              reactions={noteReactions?.[String(note.id)] ?? []}
-              fixed={false}
-              small
-              className="pb-1 pl-8"
-              onToggle={(name, on) => onReact(note.id, name, on)}
-            />
-          ) : null}
-        </div>
-      ))}
-      <div className="flex items-start gap-2 pb-1 pt-1">
-        {replying ? (
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <Textarea
-              value={body}
-              autoFocus
-              rows={3}
-              onChange={(event) => setBody(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  reply();
-                }
-                if (event.key === "Escape" && body.length === 0) setReplying(false);
-              }}
-              placeholder="Reply…"
-              aria-label="Reply to this thread"
-              className="min-h-[72px] resize-y border-border bg-transparent px-2.5 py-1.5 text-sm shadow-none focus-visible:ring-1"
-            />
-            <div className="flex items-center gap-1.5">
-              <PrimaryButton disabled={!ready || posting} onClick={reply} title="Reply (⌘/Ctrl+Enter)">
-                {posting ? "Posting…" : "Reply"}
-              </PrimaryButton>
-              <GhostButton
-                onClick={() => {
-                  setReplying(false);
-                  setBody("");
-                }}
-              >
-                Cancel
-              </GhostButton>
-            </div>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setReplying(true)}
-            className={cn(
-              "h-8 min-w-0 flex-1 rounded-md border border-border px-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-state-hover",
-              discussion.individual && "max-w-[200px]",
-            )}
-          >
-            Reply…
-          </button>
+    <div className="overflow-hidden rounded-[10px] shadow-[inset_0_0_0_1px_var(--border)]">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={toggle}
+        className={cn(
+          "flex min-h-10 w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-state-hover",
+          expanded && "border-b border-border/70",
         )}
-        {discussion.resolvable && !replying ? (
-          <GhostButton
-            className="h-8 border border-border"
-            disabled={resolving}
-            onClick={toggleResolved}
-          >
-            {discussion.resolved ? "Reopen thread" : "Resolve thread"}
-          </GhostButton>
+      >
+        <ToggleCaret open={expanded} />
+        {place !== null ? (
+          <span className="max-w-[40%] shrink truncate font-mono text-[12.5px] text-muted-foreground" title={place}>
+            {place}
+          </span>
         ) : null}
-      </div>
+        {discussion.resolvable ? (
+          discussion.resolved ? (
+            <Tag color="green">Resolved</Tag>
+          ) : (
+            <Tag color="orange">Unresolved</Tag>
+          )
+        ) : null}
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">{summary}</span>
+        {fresh > 0 ? (
+          <span className="shrink-0 rounded-full bg-[rgba(35,131,226,0.12)] px-2 text-xs font-medium text-[rgb(35,131,226)]">
+            ● {fresh} new
+          </span>
+        ) : null}
+        <span className="flex shrink-0 -space-x-1.5">
+          {authors.slice(0, 3).map((name) => (
+            <Avatar key={name} username={name} size={20} className="ring-2 ring-background" />
+          ))}
+        </span>
+        <span className="w-4 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{count}</span>
+      </button>
+
+      {expanded ? (
+        <>
+          {discussion.notes.map((note, index) => (
+            <div key={`${note.createdAt}-${index}`} className={cn("px-3", index > 0 && "border-t border-border/60")}>
+              <CommentItem note={note} />
+              {onReact !== undefined && note.id > 0 ? (
+                <ReactionBar
+                  reactions={noteReactions?.[String(note.id)] ?? []}
+                  fixed={false}
+                  small
+                  className="pb-2 pl-8"
+                  onToggle={(name, on) => onReact(note.id, name, on)}
+                />
+              ) : null}
+            </div>
+          ))}
+
+          {discussion.resolvable && discussion.resolved ? (
+            <div className={footerRow}>
+              <span className="mr-auto truncate text-[13px] text-muted-foreground">
+                {discussion.resolvedBy.length > 0 ? `Resolved by ${discussion.resolvedBy}` : "Resolved"}
+              </span>
+              <ThreadButton disabled={resolving} onClick={toggleResolved}>
+                ↩ Reopen
+              </ThreadButton>
+            </div>
+          ) : replying ? (
+            <div className="flex flex-col gap-2 border-t border-border/70 py-2.5 pl-11 pr-3">
+              <Textarea
+                value={body}
+                autoFocus
+                rows={3}
+                onChange={(event) => setBody(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    reply();
+                  }
+                  if (event.key === "Escape" && body.length === 0) setReplying(false);
+                }}
+                placeholder="Reply…"
+                aria-label="Reply to this thread"
+                className="min-h-[72px] resize-y border-border bg-transparent px-3 py-2 text-sm shadow-none focus-visible:ring-1"
+              />
+              <div className="flex items-center gap-2">
+                <PrimaryButton disabled={!ready || posting} onClick={reply} title="Reply (⌘/Ctrl+Enter)">
+                  {posting ? "Posting…" : "Reply"}
+                </PrimaryButton>
+                <GhostButton
+                  onClick={() => {
+                    setReplying(false);
+                    setBody("");
+                  }}
+                >
+                  Cancel
+                </GhostButton>
+                {discussion.resolvable ? (
+                  <ThreadButton className="ml-auto" disabled={resolving} onClick={toggleResolved}>
+                    ✅ Resolve
+                  </ThreadButton>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className={footerRow}>
+              <button
+                type="button"
+                onClick={() => setReplying(true)}
+                className="h-8 min-w-0 flex-1 rounded-md px-3 text-left text-sm text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover"
+              >
+                Reply…
+              </button>
+              {discussion.resolvable ? (
+                <ThreadButton disabled={resolving} onClick={toggleResolved}>
+                  ✅ Resolve
+                </ThreadButton>
+              ) : null}
+            </div>
+          )}
+        </>
+      ) : null}
     </div>
+  );
+}
+
+/** A quiet bordered button for the thread footer: Resolve, Reopen. */
+function ThreadButton({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13.5px] text-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    />
   );
 }
 

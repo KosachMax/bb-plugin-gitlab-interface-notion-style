@@ -249,6 +249,8 @@ const mergeRequestSchema = z
           individual: z.boolean(),
           /** Can be resolved: review threads, not plain comments. */
           resolvable: z.boolean(),
+          /** Who resolved it; "" when unresolved or GitLab did not say. */
+          resolvedBy: z.string(),
           /** "" for a thread that is not attached to a file. */
           path: z.string(),
           line: z.number().int().nonnegative().nullable(),
@@ -729,6 +731,7 @@ const gitlabMergeRequestRowSchema = gitlabItemRowSchema.extend({
 });
 const gitlabNoteRowSchema = z.looseObject({
   id: z.number().int().nonnegative().catch(0),
+  resolved_by: gitlabUserRowSchema.nullish().catch(null),
   body: z.string().catch(""),
   system: z.boolean().catch(false),
   created_at: z.string().catch(""),
@@ -2733,6 +2736,7 @@ export default async function plugin(bb: BbPluginApi) {
         id: string;
         individual: boolean;
         resolvable: boolean;
+        resolvedBy: string;
         path: string;
         line: number | null;
         resolved: boolean;
@@ -2759,6 +2763,8 @@ export default async function plugin(bb: BbPluginApi) {
           id: discussion.id,
           individual: discussion.individual_note,
           resolvable,
+          resolvedBy:
+            discussion.notes.find((note) => note.resolved && note.resolved_by != null)?.resolved_by?.username ?? "",
           path: position?.new_path ?? position?.old_path ?? "",
           line: position == null ? null : (position.new_line ?? position.old_line),
           resolved:
