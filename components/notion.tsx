@@ -546,3 +546,56 @@ export function Person({ username }: { username: string }) {
     </span>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Dialog shell, Notion-style: a rounded card with a clear head (icon, title,
+// one-line lead), a body of tinted callouts and quiet option rows, and a footer
+// with ghost cancel and the blue action. Title and lead differ in weight and
+// colour so they never run together.
+// ---------------------------------------------------------------------------
+
+export const DIALOG_SHELL =
+  "max-w-md gap-0 overflow-hidden rounded-xl border-0 p-0 shadow-[rgba(15,15,15,0.05)_0_0_0_1px,rgba(15,15,15,0.1)_0_5px_10px,rgba(15,15,15,0.2)_0_15px_40px] [.dark_&]:shadow-[rgba(255,255,255,0.094)_0_0_0_1px,rgba(0,0,0,0.3)_0_5px_10px,rgba(0,0,0,0.4)_0_15px_40px]";
+export const DIALOG_HEAD = "flex-row items-start gap-3.5 space-y-0 px-6 pt-6 text-left";
+export const DIALOG_ICON =
+  "grid size-10 shrink-0 place-items-center rounded-lg bg-foreground/[0.05] text-xl leading-none";
+export const DIALOG_TITLE = "text-[18px] font-semibold leading-snug tracking-normal text-foreground";
+export const DIALOG_LEAD = "mt-1 text-sm leading-relaxed text-muted-foreground";
+export const DIALOG_BODY = "flex flex-col gap-2.5 px-6 pt-5";
+export const DIALOG_LIST =
+  "flex flex-col rounded-lg py-1 shadow-[inset_0_0_0_1px_var(--border)]";
+export const DIALOG_FOOTER = "gap-2 px-6 pb-6 pt-5 sm:space-x-0";
+
+const DIALOG_TONE: Record<"bad" | "warn" | "info" | "neutral", string> = {
+  bad: "bg-red-500/[0.12]",
+  warn: "bg-amber-500/[0.15]",
+  info: "bg-[rgba(35,131,226,0.12)]",
+  neutral: "bg-foreground/[0.05]",
+};
+
+/** A tinted note inside a dialog: red blocks, amber checks, blue information. */
+export function DialogCallout({
+  tone,
+  icon,
+  title,
+  detail,
+}: {
+  tone: keyof typeof DIALOG_TONE;
+  icon: string;
+  title: string;
+  detail?: string;
+}) {
+  return (
+    <div role="status" className={cn("flex items-start gap-3 rounded-lg px-3.5 py-3", DIALOG_TONE[tone])}>
+      <span aria-hidden="true" className="pt-px text-base leading-6">
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1 text-sm leading-6">
+        <div className="font-semibold text-foreground first-letter:uppercase">{title}</div>
+        {detail !== undefined && detail.length > 0 ? (
+          <div className="text-muted-foreground">{detail}</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}

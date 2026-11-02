@@ -75,6 +75,15 @@ import {
   Avatar,
   Callout,
   ChipButton,
+  DialogCallout,
+  DIALOG_BODY,
+  DIALOG_FOOTER,
+  DIALOG_HEAD,
+  DIALOG_ICON,
+  DIALOG_LEAD,
+  DIALOG_LIST,
+  DIALOG_SHELL,
+  DIALOG_TITLE,
   ViewerContext,
   colorForName,
   EmptyValue,
@@ -2968,17 +2977,20 @@ function RunPipelineDialog({
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Run pipeline</DialogTitle>
-          <DialogDescription>
-            {mergeRequestIid !== undefined
-              ? `Starts the merge-request pipeline for !${mergeRequestIid}.`
-              : `Starts a new pipeline in ${shortProject(project)}.`}
-          </DialogDescription>
+      <DialogContent className={DIALOG_SHELL}>
+        <DialogHeader className={DIALOG_HEAD}>
+          <span className={DIALOG_ICON} aria-hidden="true">▶️</span>
+          <div className="min-w-0">
+            <DialogTitle className={DIALOG_TITLE}>Run pipeline</DialogTitle>
+            <DialogDescription className={DIALOG_LEAD}>
+              {mergeRequestIid !== undefined
+                ? `Starts the merge-request pipeline for !${mergeRequestIid}.`
+                : `Starts a new pipeline in ${shortProject(project)}.`}
+            </DialogDescription>
+          </div>
         </DialogHeader>
         {mergeRequestIid === undefined ? (
-          <label className="flex flex-col gap-1.5 text-sm">
+          <label className={cn(DIALOG_BODY, "flex-col text-sm")}>
             <span className="text-muted-foreground">Branch or tag</span>
             <input
               value={ref}
@@ -2993,7 +3005,7 @@ function RunPipelineDialog({
             />
           </label>
         ) : null}
-        <DialogFooter>
+        <DialogFooter className={DIALOG_FOOTER}>
           <GhostButton onClick={() => onOpenChange(false)}>Cancel</GhostButton>
           <PrimaryButton disabled={starting} onClick={start}>
             {starting ? "Starting…" : "Run pipeline"}
@@ -4610,6 +4622,29 @@ function RailSection({
  * it enforces (a required pipeline, a required approval) and not a review that
  * has not happened yet. The merge is pinned to the commit shown here.
  */
+/** Blockers that need a fix (red) apart from things to wait for or check (amber). */
+function blockerTone(entry: string): "bad" | "warn" {
+  return /failed|conflict/.test(entry) ? "bad" : "warn";
+}
+
+function blockerIcon(entry: string): string {
+  if (/pipeline/.test(entry)) return "❌";
+  if (/conflict/.test(entry)) return "⚠️";
+  if (/thread/.test(entry)) return "💬";
+  if (/review|approv/.test(entry)) return "👀";
+  return "⏳";
+}
+
+function blockerHint(entry: string, targetBranch: string): string {
+  if (/pipeline failed/.test(entry)) return "Open the pipeline to see the failed job.";
+  if (/conflict/.test(entry)) return `Rebase the branch onto ${targetBranch} first.`;
+  if (/thread/.test(entry)) return "Reply to them or resolve them.";
+  if (/not reviewed/.test(entry)) return "Ask someone to review or approve it.";
+  if (/draft/.test(entry)) return "Mark it ready for review first.";
+  if (/approval/.test(entry)) return "GitLab needs more approvals before it merges.";
+  return "";
+}
+
 function MergeDialog({
   project,
   iid,
@@ -4685,7 +4720,7 @@ function MergeDialog({
     label: string,
     hint?: string,
   ) => (
-    <label key={id} className="flex cursor-pointer items-start gap-2.5 text-sm">
+    <label key={id} className="flex cursor-pointer items-start gap-3 rounded-md px-3 py-2.5 text-sm transition-colors hover:bg-state-hover">
       <input
         type="checkbox"
         checked={checked}
@@ -4703,35 +4738,34 @@ function MergeDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Merge !{iid} into {mr.targetBranch}?</DialogTitle>
-          <DialogDescription>
-            {mr.title}
-          </DialogDescription>
+      <DialogContent className={DIALOG_SHELL}>
+        <DialogHeader className={DIALOG_HEAD}>
+          <span className={DIALOG_ICON} aria-hidden="true">🔀</span>
+          <div className="min-w-0">
+            <DialogTitle className={DIALOG_TITLE}>Merge !{iid} into {mr.targetBranch}?</DialogTitle>
+            <DialogDescription className={DIALOG_LEAD}>{mr.title}</DialogDescription>
+          </div>
         </DialogHeader>
-        <div className="flex flex-col gap-3 text-sm">
-          <p className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
+        <div className={DIALOG_BODY}>
+          {needsAcknowledgement
+            ? open_.filter((entry) => !entry.startsWith("merge status:")).map((entry) => (
+                <DialogCallout
+                  key={entry}
+                  tone={blockerTone(entry)}
+                  icon={blockerIcon(entry)}
+                  title={entry}
+                  detail={blockerHint(entry, mr.targetBranch)}
+                />
+              ))
+            : null}
+          <p className="flex flex-wrap items-center gap-1.5 px-1 pt-1 text-sm text-muted-foreground">
             <CopyText value={mr.sourceBranch} />
             <span>→</span>
             <CopyText value={mr.targetBranch} />
             <span>at commit</span>
             <CopyText value={mr.headSha} variant="plain" className="text-foreground">{mr.headSha.slice(0, 8)}</CopyText>
           </p>
-          {needsAcknowledgement ? (
-            <Callout icon="⚠️" className="py-3">
-              <p className="font-medium text-foreground">Not everything is green</p>
-              <ul className="list-disc pl-5 text-muted-foreground">
-                {open_.map((entry) => (
-                  <li key={entry}>{entry}</li>
-                ))}
-              </ul>
-              <div className="pt-2">
-                {checkbox("ack", acknowledged, setAcknowledged, "Merge anyway")}
-              </div>
-            </Callout>
-          ) : null}
-          <div className="flex flex-col gap-2.5">
+          <div className={DIALOG_LIST}>
             {pipelineRunning
               ? checkbox(
                   "when",
@@ -4743,9 +4777,12 @@ function MergeDialog({
               : null}
             {checkbox("squash", squash, setSquash, "Squash commits")}
             {checkbox("remove", removeBranch, setRemoveBranch, "Delete the source branch")}
+            {needsAcknowledgement
+              ? checkbox("ack", acknowledged, setAcknowledged, "Merge anyway", "I know it is blocked and want to merge")
+              : null}
           </div>
         </div>
-        <DialogFooter>
+        <DialogFooter className={DIALOG_FOOTER}>
           <GhostButton onClick={() => onOpenChange(false)}>Cancel</GhostButton>
           <PrimaryButton disabled={!canConfirm} onClick={confirm}>
             {merging ? "Merging…" : whenGreen && pipelineRunning ? "Merge when green" : "Merge"}
@@ -5250,36 +5287,62 @@ function CommitsTab({
       ) : null}
 
       <Dialog open={confirm !== null} onOpenChange={(open) => !open && !starting && setConfirm(null)}>
-        <DialogContent className="max-w-md rounded-xl" onOpenAutoFocus={(event) => {
-          event.preventDefault();
-          (event.currentTarget as HTMLElement).querySelector<HTMLElement>("[data-cancel]")?.focus();
-        }}>
-          <DialogHeader>
-            <DialogTitle>
-              Cherry-pick {confirm?.length ?? 0} commit{confirm?.length === 1 ? "" : "s"} to {promo.target}?
-            </DialogTitle>
-            <DialogDescription>
-              An agent branches off <span className="font-mono">{promo.target}</span>, runs{" "}
-              <span className="font-mono">cherry-pick -x</span> in order and opens a merge request. It stops and asks on a conflict.
-            </DialogDescription>
+        <DialogContent
+          className={DIALOG_SHELL}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            (event.currentTarget as HTMLElement).querySelector<HTMLElement>("[data-cancel]")?.focus();
+          }}
+        >
+          <DialogHeader className={DIALOG_HEAD}>
+            <span className={DIALOG_ICON} aria-hidden="true">🍒</span>
+            <div className="min-w-0">
+              <DialogTitle className={DIALOG_TITLE}>
+                Cherry-pick {confirm?.length ?? 0} commit{confirm?.length === 1 ? "" : "s"} to {promo.target}?
+              </DialogTitle>
+              <DialogDescription className={DIALOG_LEAD}>
+                An agent opens a merge request with <span className="font-mono">cherry-pick -x</span>.
+              </DialogDescription>
+            </div>
           </DialogHeader>
-          <div className="max-h-52 overflow-auto rounded-md py-1 shadow-[inset_0_0_0_1px_var(--border)]">
-            {commits
-              .filter((c) => confirm?.includes(c.sha))
-              .map((c) => (
-                <div key={c.sha} className="truncate px-2.5 py-1 text-sm">
-                  <span className="mr-1.5 font-mono text-[12px] text-muted-foreground">{c.sha.slice(0, 8)}</span>
-                  {c.title}
-                </div>
-              ))}
+          <div className={DIALOG_BODY}>
+            <div className={cn(DIALOG_LIST, "max-h-52 overflow-auto")}>
+              {commits
+                .filter((c) => confirm?.includes(c.sha))
+                .map((c) => (
+                  <div key={c.sha} className="flex min-w-0 items-center gap-2.5 px-3 py-1.5 text-sm">
+                    <span className="shrink-0 font-mono text-[12.5px] text-muted-foreground">{c.sha.slice(0, 8)}</span>
+                    <span className="min-w-0 truncate">{c.title}</span>
+                  </div>
+                ))}
+            </div>
+            <DialogCallout
+              tone="info"
+              icon="ℹ️"
+              title="If it conflicts, the agent stops"
+              detail="It asks you before changing anything."
+            />
+            {(() => {
+              const similar = commits.filter(
+                (c) => confirm?.includes(c.sha) && c.status === "unknown" && c.targetSha !== null,
+              ).length;
+              return similar > 0 ? (
+                <DialogCallout
+                  tone="warn"
+                  icon="⚠️"
+                  title={`${similar} ${similar === 1 ? "commit looks" : "commits look"} similar on ${promo.target}`}
+                  detail="Same title, different diff. Check it first."
+                />
+              ) : null;
+            })()}
           </div>
-          <DialogFooter>
-            <Button variant="outline" data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
+          <DialogFooter className={DIALOG_FOOTER}>
+            <GhostButton data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
               Cancel
-            </Button>
-            <Button disabled={starting} onClick={() => confirm !== null && startPick(confirm)}>
-              {starting ? "Starting…" : "Start"}
-            </Button>
+            </GhostButton>
+            <PrimaryButton disabled={starting} onClick={() => confirm !== null && startPick(confirm)}>
+              {starting ? "Starting…" : "Start cherry-pick"}
+            </PrimaryButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
