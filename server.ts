@@ -671,6 +671,7 @@ export const gitlabRpcContract = defineRpcContract({
         count: z.number().int().nonnegative(),
         additions: z.number().int().nonnegative(),
         deletions: z.number().int().nonnegative(),
+        projects: z.array(z.object({ name: z.string(), count: z.number().int().nonnegative() }).strict()),
       }).strict()),
     }).strict(),
   },
@@ -2334,7 +2335,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const calendarCache = new Map<string, { at: number; value: Promise<{
     host: string; startDate: string; endDate: string; totalCommits: number;
-    projects: number; complete: boolean; days: { date: string; count: number; additions: number; deletions: number }[];
+    projects: number; complete: boolean; days: { date: string; count: number; additions: number; deletions: number; projects: { name: string; count: number }[] }[];
   }> }>();
 
   async function contributionCalendar(host: string, timeZone: string) {
@@ -2372,7 +2373,8 @@ export default async function plugin(bb: BbPluginApi) {
               `${projectApiBase(entry.project)}/repository/commits?all=true&with_stats=true&since=${encodeURIComponent(since)}&author=${encodeURIComponent(username)}&per_page=100&page=${page}`,
             ).catch(() => []),
           );
-          commits.push(...rows);
+          const name = entry.project.split("/").pop() ?? entry.project;
+          commits.push(...rows.map((row) => ({ ...row, project: name })));
           if (rows.length < 100) break;
           if (page >= 20) { complete = false; break; }
         }

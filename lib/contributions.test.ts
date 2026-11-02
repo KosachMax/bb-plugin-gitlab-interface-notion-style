@@ -13,6 +13,15 @@ describe("aggregateCommits", () => {
       { id: "c", authored_date: "2026-09-01T10:00:00Z" },
       { id: "m", authored_date: "2026-10-31T11:00:00Z", parent_ids: ["x", "y"], stats: { additions: 9000, deletions: 9 } },
     ], "2026-10-01", "2026-10-31", moscow);
-    expect(days).toEqual([{ date: "2026-10-31", count: 2, additions: 11, deletions: 3 }]);
+    expect(days).toEqual([{ date: "2026-10-31", count: 2, additions: 11, deletions: 3, projects: [] }]);
+  });
+
+  it("splits a day's commits by project, busiest first", () => {
+    const days = aggregateCommits([
+      { id: "a", authored_date: "2026-10-31T09:00:00Z", project: "backend" },
+      { id: "b", authored_date: "2026-10-31T10:00:00Z", project: "plugin" },
+      { id: "c", authored_date: "2026-10-31T11:00:00Z", project: "plugin" },
+    ], "2026-10-01", "2026-10-31", moscow);
+    expect(days[0]?.projects).toEqual([{ name: "plugin", count: 2 }, { name: "backend", count: 1 }]);
   });
 });

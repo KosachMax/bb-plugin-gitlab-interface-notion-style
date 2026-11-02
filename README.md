@@ -240,5 +240,7 @@ bb plugin build             # dist/server.js + dist/app.js + dist/app.css
 bb plugin reload gitlab
 ```
 
+UI changes follow the [design guide](docs/design/DESIGN.md): tokens, components and per-screen rules, with a visual [mockup](docs/design/mockup.html).
+
 `bb plugin dev` watches and reloads on every save. Plugin logs:
 `bb plugin logs gitlab -f`.

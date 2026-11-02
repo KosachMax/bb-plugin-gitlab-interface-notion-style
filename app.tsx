@@ -88,6 +88,15 @@ import {
   colorForName,
   EmptyValue,
   FilterPill,
+  Counter,
+  ResetButton,
+  SearchField,
+  SecondaryButton,
+  SegmentedControl,
+  StatusIcon,
+  UnderlineTab,
+  UnderlineTabs,
+  CARD,
   GhostButton,
   Icon,
   ICONS,
@@ -879,7 +888,10 @@ function CommentItem({ note }: { note: Note }) {
         </p>
         <div
           ref={bodyRef}
-          className={cn(!expanded && "max-h-[7.5rem] overflow-hidden")}
+          className={cn(
+            !expanded && "max-h-[7.5rem] overflow-hidden",
+            !expanded && overflows && "[mask-image:linear-gradient(to_bottom,black_80%,transparent)]",
+          )}
         >
           <Markdown content={note.body} className="text-sm leading-relaxed" />
         </div>
@@ -1340,15 +1352,19 @@ function FilterPillMenu({
       }}
     >
       <DropdownMenuTrigger asChild>
-        <FilterPill active={summary.length > 0}>
-          <Icon path={FILTER_ICONS[filter]} size={14} />
-          <span className="min-w-0 truncate">
-            {filter === "draft"
-              ? "Draft only"
-              : summary.length > 0
-                ? `${title}: ${summary.join(", ")}`
-                : title}
-          </span>
+        <FilterPill
+          active={summary.length > 0}
+          icon={FILTER_ICONS[filter]}
+          removeLabel={`Remove the ${title.toLowerCase()} filter`}
+          onRemove={() =>
+            onQuery(withoutQualifiers(query, (key, value) => tokenBelongsTo(filter, key, value)))
+          }
+        >
+          {filter === "draft"
+            ? "Draft only"
+            : summary.length > 0
+              ? `${title}: ${summary.join(", ")}`
+              : title}
         </FilterPill>
       </DropdownMenuTrigger>
       <SearchableMenuContent
@@ -1438,16 +1454,16 @@ function FilterBar({
           <FilterPill
             key={filter}
             active
+            icon={FILTER_ICONS.draft}
+            removeLabel="Remove the draft filter"
+            onRemove={() =>
+              onQuery(withoutQualifiers(query, (key, value) => tokenBelongsTo("draft", key, value)))
+            }
             onClick={() =>
-              onQuery(
-                withoutQualifiers(query, (key, value) =>
-                  tokenBelongsTo("draft", key, value),
-                ),
-              )
+              onQuery(withoutQualifiers(query, (key, value) => tokenBelongsTo("draft", key, value)))
             }
             title="Remove the draft filter"
           >
-            <Icon path={FILTER_ICONS.draft} size={14} />
             Draft only
           </FilterPill>
         ) : (
@@ -1465,8 +1481,8 @@ function FilterBar({
       {addable.length > 0 ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <GhostButton className="h-7 rounded-full px-2">
-              <Icon path={ICONS.plus} size={14} />
+            <GhostButton className="px-2">
+              <Icon path={ICONS.plus} size={15} />
               Filter
             </GhostButton>
           </DropdownMenuTrigger>
@@ -1490,90 +1506,87 @@ function FilterBar({
         </DropdownMenu>
       ) : null}
       {shown.length > 0 ? (
-        <GhostButton
-          className="h-7 px-2 text-sm"
+        <ResetButton
           onClick={() => {
             setPending(null);
             // Back to the default view (open items), keeping the search text.
             onQuery(withQueryText(DEFAULT_QUERY, queryText(query)));
           }}
-        >
-          Reset
-        </GhostButton>
+        />
       ) : null}
     </div>
   );
 }
 
-/** Notion's toolbar search: an icon that opens into an inline field. */
+/** The list search: the free text of the query, always visible. */
 function SearchBox({
   query,
   onQuery,
+  placeholder,
 }: {
   query: string;
   onQuery: (query: string) => void;
+  placeholder: string;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const text = queryText(query);
+  // The query keeps tokens only, so typed spaces live here until the next word.
   const [draft, setDraft] = useState<string | null>(null);
-  const [open, setOpen] = useState(text.length > 0);
-  const value = draft ?? text;
-  if (!open && text.length === 0) {
-    return (
-      <GhostButton
-        aria-label="Search"
-        className="w-7 justify-center px-0"
-        onClick={() => {
-          setOpen(true);
-          requestAnimationFrame(() => inputRef.current?.focus());
-        }}
-      >
-        <Icon path={ICONS.search} />
-      </GhostButton>
-    );
-  }
+  const text = queryText(query);
   return (
-    <span className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground">
-      <Icon path={ICONS.search} />
-      <input
-        ref={inputRef}
-        autoFocus
-        value={value}
-        onChange={(event) => {
-          setDraft(event.target.value);
-          onQuery(withQueryText(query, event.target.value));
-        }}
-        onBlur={() => {
+    <span
+      className="contents"
+      onBlur={() => setDraft(null)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
           setDraft(null);
-          if (queryText(query).length === 0) setOpen(false);
+          onQuery(withQueryText(query, ""));
+        }
+      }}
+    >
+      <SearchField
+        value={draft ?? text}
+        onChange={(value) => {
+          setDraft(value);
+          onQuery(withQueryText(query, value));
         }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            setDraft(null);
-            onQuery(withQueryText(query, ""));
-            setOpen(false);
-          }
-        }}
-        placeholder="Type to search…"
-        aria-label="Search"
-        spellCheck={false}
-        className="w-44 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+        placeholder={placeholder}
+        label="Search"
       />
-      {value.length > 0 ? (
-        <button
-          type="button"
-          aria-label="Clear search"
-          className="rounded text-muted-foreground hover:text-foreground"
-          onMouseDown={(event) => {
-            event.preventDefault();
-            setDraft(null);
-            onQuery(withQueryText(query, ""));
-          }}
-        >
-          <Icon path={ICONS.close} size={14} />
-        </button>
-      ) : null}
     </span>
+  );
+}
+
+/** Network failures ("no such host", "dial tcp") mean VPN or Wi-Fi, not a bug. */
+const UNREACHABLE = /no such host|dial tcp|i\/o timeout|connection refused|network is unreachable|could not resolve|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i;
+
+/** The host named in a glab error, from its --hostname flag or the API URL. */
+function errorHost(message: string): string | null {
+  return /--hostname\s+(\S+)/.exec(message)?.[1] ?? /https?:\/\/([^/\s"]+)/.exec(message)?.[1] ?? null;
+}
+
+/**
+ * An error as a person reads it: the cause on top, a Retry, and the raw glab
+ * output folded under Details instead of a full API URL across the page.
+ */
+function ErrorCallout({ error, onRetry, className }: { error: string; onRetry?: () => void; className?: string }) {
+  const unreachable = UNREACHABLE.test(error);
+  const host = errorHost(error);
+  return (
+    <Callout
+      icon="⚠️"
+      tone="warn"
+      {...(className !== undefined ? { className } : {})}
+      {...(unreachable ? { details: error } : {})}
+      {...(onRetry !== undefined ? { action: <SecondaryButton onClick={onRetry}>Retry</SecondaryButton> } : {})}
+    >
+      {unreachable ? (
+        <>
+          <div className="font-semibold text-foreground">Can&apos;t reach {host ?? "GitLab"}</div>
+          <div className="text-muted-foreground">Check the VPN or network connection.</div>
+        </>
+      ) : (
+        <span className="break-words">{error}</span>
+      )}
+    </Callout>
   );
 }
 
@@ -1956,7 +1969,7 @@ function ItemsTable({
     rows = (
       <tr>
         <td colSpan={columns} className="py-4">
-          <Callout icon="⚠️">{error}</Callout>
+          <ErrorCallout error={error} />
         </td>
       </tr>
     );
@@ -2071,12 +2084,12 @@ function QuickViews({
   const views =
     kind === "mr"
       ? [
-          { key: "review", label: "Review requests", emoji: "👀" },
-          { key: "author", label: "Mine", emoji: "✍️" },
+          { key: "review", label: "Review requests", icon: ICONS.eye },
+          { key: "author", label: "Mine", icon: ICONS.pen },
         ]
       : [
-          { key: "assignee", label: "Assigned to me", emoji: "🙋" },
-          { key: "author", label: "Mine", emoji: "✍️" },
+          { key: "assignee", label: "Assigned to me", icon: ICONS.userCheck },
+          { key: "author", label: "Mine", icon: ICONS.pen },
         ];
   const isMe = (value: string) => value.toLowerCase() === "@me";
   const current =
@@ -2085,33 +2098,20 @@ function QuickViews({
     const cleared = withoutQualifiers(query, (k, v) => views.some((view) => view.key === k) && isMe(v));
     onQuery(key === "" ? cleared : withQualifier(cleared, key, "@me"));
   };
-  const tabs = [{ key: "", label: "All", emoji: "" }, ...views];
+  const tabs: { key: string; label: string; icon?: string }[] = [{ key: "", label: "All" }, ...views];
   return (
-    <div role="tablist" aria-label="Views" className="mb-2 flex items-center gap-0.5 shadow-[inset_0_-1px_0_var(--border)]">
-      {tabs.map((tab) => {
-        const on = current === tab.key;
-        return (
-          <button
-            key={tab.key || "all"}
-            type="button"
-            role="tab"
-            aria-selected={on}
-            onClick={() => select(tab.key)}
-            className={cn(
-              "relative inline-flex h-8 items-center px-1.5 text-sm transition-colors after:absolute after:inset-x-1.5 after:bottom-0 after:h-0.5",
-              on
-                ? "font-medium text-foreground after:bg-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            <span className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-state-hover">
-              {tab.emoji !== "" ? <span aria-hidden="true">{tab.emoji}</span> : null}
-              {tab.label}
-            </span>
-          </button>
-        );
-      })}
-    </div>
+    <UnderlineTabs label="Views" className="mt-2">
+      {tabs.map((tab) => (
+        <UnderlineTab
+          key={tab.key || "all"}
+          active={current === tab.key}
+          onClick={() => select(tab.key)}
+          {...(tab.icon !== undefined ? { icon: tab.icon } : {})}
+        >
+          {tab.label}
+        </UnderlineTab>
+      ))}
+    </UnderlineTabs>
   );
 }
 
@@ -2143,12 +2143,6 @@ function DatabaseView({
         : items.filter((item) => matchesItemQuery(item, parsed, viewer, { assigneesReview })),
     [items, parsed, viewer, assigneesReview],
   );
-  const hasQualifiers = queryTokens(query).some((token) => token.key !== "");
-  // The funnel shows and hides the pill row; it starts shown when filtering.
-  const [showFilters, setShowFilters] = useSticky(
-    `filters-open:${kind}`,
-    hasQualifiers,
-  );
   const onNew = kind === "issue" ? () => navigate({ view: "new" }) : undefined;
 
   return (
@@ -2162,36 +2156,27 @@ function DatabaseView({
           navigate={navigate}
         />
         <span className="flex-1" />
-        <GhostButton
-          aria-label="Filter"
-          aria-pressed={showFilters}
-          className={cn(
-            "w-7 justify-center px-0",
-            hasQualifiers && "text-blue-600 [.dark_&]:text-blue-400",
-          )}
-          onClick={() => setShowFilters((prev) => !prev)}
-        >
-          <Icon path={ICONS.filter} />
-        </GhostButton>
-        <SearchBox query={query} onQuery={onQuery} />
+        <SearchBox
+          query={query}
+          onQuery={onQuery}
+          placeholder={kind === "mr" ? "Search merge requests…" : "Search issues…"}
+        />
         {onNew !== undefined ? (
           <PrimaryButton className="ml-1" onClick={onNew}>
-            New
+            New issue
           </PrimaryButton>
         ) : null}
       </div>
       <QuickViews kind={kind} query={query} onQuery={onQuery} />
-      {showFilters ? (
-        <div className="pb-2">
-          <FilterBar
-            kind={kind}
-            items={items}
-            projects={projects}
-            query={query}
-            onQuery={onQuery}
-          />
-        </div>
-      ) : null}
+      <div className="py-2.5">
+        <FilterBar
+          kind={kind}
+          items={items}
+          projects={projects}
+          query={query}
+          onQuery={onQuery}
+        />
+      </div>
       <ItemsTable
         kind={kind}
         items={filtered}
@@ -2566,7 +2551,7 @@ function IssueDetailView({
     [setLabels, project, iid, load],
   );
 
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null) return <ErrorCallout error={error} onRetry={load} />;
   if (detail === null) return <PageSkeleton />;
 
   const issueLinks = links[linkKey("issue", project, iid)];
@@ -2586,16 +2571,22 @@ function IssueDetailView({
             >
               {spawningKey !== null ? "Starting…" : "⚡ Send agent"}
             </GhostButton>
+            <GhostButton onClick={() => window.open(detail.url, "_blank")}>Open in GitLab ↗</GhostButton>
             <PageMoreMenu url={detail.url} />
           </>
         }
       />
-      <article className="mx-auto w-full max-w-[708px] pt-12">
-        <h1 className="pb-2 text-[40px] font-bold leading-[1.2] text-foreground">
+      <article className="mx-auto w-full max-w-[960px] pb-8 pt-8">
+        <h1 className="pb-2 text-[32px] font-bold leading-[1.2] text-foreground">
           {detail.title}
         </h1>
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 pb-3 text-sm text-muted-foreground">
+          <Person username={detail.author} />
+          <span aria-hidden="true">·</span>
+          <span title={formatDateTime(detail.updatedAt)}>updated {relativeTime(detail.updatedAt)}</span>
+        </div>
 
-        <div className="flex flex-col gap-0.5 py-1.5">
+        <div className="mb-6 flex flex-col gap-0.5 border-y border-border/70 py-1.5">
           <PropertyRow
             icon={ICONS.status}
             label="Status"
@@ -2640,16 +2631,8 @@ function IssueDetailView({
               />
             }
           />
-          <PropertyRow icon={ICONS.user} label="Author">
-            <Person username={detail.author} />
-          </PropertyRow>
           <PropertyRow icon={ICONS.folder} label="Project">
             <span title={project}>{project}</span>
-          </PropertyRow>
-          <PropertyRow icon={ICONS.clock} label="Updated">
-            <span title={formatDateTime(detail.updatedAt)}>
-              {formatDateTime(detail.updatedAt)}
-            </span>
           </PropertyRow>
           {issueLinks !== undefined && issueLinks.length > 0 ? (
             <PropertyRow icon={ICONS.bolt} label="Agents">
@@ -2658,7 +2641,14 @@ function IssueDetailView({
           ) : null}
         </div>
 
-        <div className="pb-2 pt-1">
+        <section className="flex flex-col gap-1.5 pb-8">
+          <h2 className="text-base font-semibold text-foreground">Description</h2>
+          <PageBody16 body={detail.body} />
+        </section>
+        <section className="flex flex-col gap-1.5">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            Comments {detail.notes.length > 0 ? <Counter>{detail.notes.length}</Counter> : null}
+          </h2>
           <PageComments
             method="commentIssue"
             project={project}
@@ -2666,10 +2656,7 @@ function IssueDetailView({
             notes={detail.notes}
             onPosted={load}
           />
-        </div>
-        <div className="border-t border-border/70 pt-6">
-          <PageBody16 body={detail.body} />
-        </div>
+        </section>
       </article>
     </div>
   );
@@ -2793,7 +2780,7 @@ function JobLog({
   }, [result]);
   if (result === null) return <Skeleton className="my-1 ml-7 h-24 w-[calc(100%-1.75rem)]" />;
   if ("error" in result) {
-    return <Callout icon="⚠️" className="my-1 ml-7">{result.error}</Callout>;
+    return <ErrorCallout className="my-1 ml-7" error={result.error} />;
   }
   return (
     <div className="my-1 ml-7 flex flex-col gap-1">
@@ -3008,7 +2995,7 @@ function RunPipelineDialog({
           </label>
         ) : null}
         <DialogFooter className={DIALOG_FOOTER}>
-          <GhostButton onClick={() => onOpenChange(false)}>Cancel</GhostButton>
+          <SecondaryButton onClick={() => onOpenChange(false)}>Cancel</SecondaryButton>
           <PrimaryButton disabled={starting} onClick={start}>
             {starting ? "Starting…" : "Run pipeline"}
           </PrimaryButton>
@@ -3063,7 +3050,7 @@ function PipelineDetailView({
   usePolling(data !== null && !isTerminalPipelineStatus(data.pipeline.status), load);
   const actions = usePipelineActions(project, load);
 
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null) return <ErrorCallout error={error} onRetry={load} />;
   if (data === null) return <PageSkeleton />;
   const { pipeline, jobs, mergeRequestIid } = data;
   const canRetry = retryableJobs(jobs).length > 0;
@@ -3080,74 +3067,71 @@ function PipelineDetailView({
         ]}
         actions={
           <>
-            {canRetry ? (
-              <GhostButton disabled={busy} onClick={() => actions.retryPipeline(pipeline.id)}>
-                Retry failed
-              </GhostButton>
-            ) : null}
-            {canCancel ? (
-              <GhostButton disabled={busy} onClick={() => actions.cancelPipeline(pipeline.id)}>
-                Cancel
-              </GhostButton>
-            ) : null}
-            <PrimaryButton onClick={() => setRunOpen(true)}>Run again</PrimaryButton>
+            <GhostButton onClick={() => window.open(pipeline.url, "_blank")}>Open in GitLab ↗</GhostButton>
             <PageMoreMenu url={pipeline.url} />
           </>
         }
       />
-      <article className="mx-auto w-full max-w-[708px] pt-12">
-        <h1 className="pb-2 text-[40px] font-bold leading-[1.2] text-foreground">
+      <article className="mx-auto w-full max-w-[960px] pb-8 pt-8">
+        <h1 className="pb-2 text-[32px] font-bold leading-[1.2] text-foreground">
           Pipeline #{pipeline.id}
         </h1>
-        <div className="flex flex-col gap-0.5 py-1.5">
-          <PropertyRow icon={ICONS.status} label="Status">
-            <PipelineStatus status={pipeline.status} />
-          </PropertyRow>
-          <PropertyRow icon={ICONS.branch} label="Ref">
-            {mergeRequestIid !== null ? (
-              <button
-                type="button"
-                className="inline-flex"
-                title={`Open merge request !${mergeRequestIid}`}
-                onClick={() =>
-                  bbNavigate.toPluginPanel(PANEL_PATH, {
-                    subPath: routeToSubPath({
-                      view: "merge_request",
-                      project,
-                      iid: mergeRequestIid,
-                    }),
-                  })
-                }
-              >
-                <Tag className="cursor-pointer font-mono text-[13px]">
-                  !{mergeRequestIid}
-                </Tag>
-              </button>
-            ) : (
-              <CopyText value={pipeline.ref} />
-            )}
-          </PropertyRow>
-          <PropertyRow icon={ICONS.hash} label="Commit">
-            <CopyText value={pipeline.sha} variant="plain">{shortSha(pipeline.sha)}</CopyText>
-          </PropertyRow>
-          <PropertyRow icon={ICONS.bolt} label="Source">
-            {pipeline.source.replace(/_/g, " ") || <EmptyValue />}
-          </PropertyRow>
-          {pipeline.user.length > 0 ? (
-            <PropertyRow icon={ICONS.user} label="Triggered by">
-              <Person username={pipeline.user} />
-            </PropertyRow>
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 pb-4 text-sm text-muted-foreground">
+          <PipelineStatus status={pipeline.status} />
+          {mergeRequestIid !== null ? (
+            <button
+              type="button"
+              className="inline-flex"
+              title={`Open merge request !${mergeRequestIid}`}
+              onClick={() =>
+                bbNavigate.toPluginPanel(PANEL_PATH, {
+                  subPath: routeToSubPath({ view: "merge_request", project, iid: mergeRequestIid }),
+                })
+              }
+            >
+              <Tag className="cursor-pointer font-mono">!{mergeRequestIid}</Tag>
+            </button>
+          ) : (
+            <CopyText value={pipeline.ref} />
+          )}
+          <CopyText value={pipeline.sha} variant="plain">{shortSha(pipeline.sha)}</CopyText>
+          {pipeline.source.length > 0 ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{pipeline.source.replace(/_/g, " ")}</span>
+            </>
           ) : null}
-          <PropertyRow icon={ICONS.clock} label="Duration">
-            {pipeline.durationSeconds !== null ? (
-              formatDuration(pipeline.durationSeconds)
-            ) : (
-              <EmptyValue />
-            )}
-          </PropertyRow>
-          <PropertyRow icon={ICONS.clock} label="Created">
-            {formatDateTime(pipeline.createdAt)}
-          </PropertyRow>
+          {pipeline.user.length > 0 ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="inline-flex items-center gap-1.5">by <Person username={pipeline.user} /></span>
+            </>
+          ) : null}
+          {pipeline.durationSeconds !== null ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{formatDuration(pipeline.durationSeconds)}</span>
+            </>
+          ) : null}
+          <span aria-hidden="true">·</span>
+          <span title={formatDateTime(pipeline.createdAt)}>{relativeTime(pipeline.createdAt)}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 pb-6">
+          <span className="text-sm text-muted-foreground">
+            {jobs.filter((job) => job.status === "success").length} of {jobs.length} jobs passed
+          </span>
+          <span className="flex-1" />
+          {canCancel ? (
+            <GhostButton disabled={busy} onClick={() => actions.cancelPipeline(pipeline.id)}>
+              Cancel
+            </GhostButton>
+          ) : null}
+          {canRetry ? (
+            <SecondaryButton disabled={busy} onClick={() => actions.retryPipeline(pipeline.id)}>
+              Retry failed
+            </SecondaryButton>
+          ) : null}
+          <PrimaryButton onClick={() => setRunOpen(true)}>Run again</PrimaryButton>
         </div>
 
         <div className="flex flex-col gap-2 border-t border-border/70 pt-6">
@@ -3169,11 +3153,8 @@ function PipelineDetailView({
             </Callout>
           ) : (
             <>
-              <h2 className="text-lg font-semibold text-foreground">
-                Jobs{" "}
-                <span className="pl-1 text-sm font-normal text-muted-foreground">
-                  {jobs.filter((job) => job.status === "success").length}/{jobs.length} passed
-                </span>
+              <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+                Jobs <Counter>{jobs.length}</Counter>
               </h2>
               <JobList project={project} jobs={jobs} actions={actions} />
             </>
@@ -3261,26 +3242,20 @@ function PipelinesView({
       <div className="flex flex-wrap items-center gap-1 pb-1.5" role="tablist">
         <DatabaseTabs active="pipelines" navigate={navigate} />
         <span className="flex-1" />
-        <span className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground">
-          <Icon path={ICONS.search} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search ref or commit…"
-            aria-label="Search pipelines"
-            spellCheck={false}
-            className="w-44 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
-          />
-        </span>
+        <SearchField value={search} onChange={setSearch} placeholder="Search ref or commit…" label="Search pipelines" />
         <PrimaryButton className="ml-1" onClick={() => setRunOpen(true)}>
           Run pipeline
         </PrimaryButton>
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 pb-2">
+      <div className="flex flex-wrap items-center gap-1.5 py-2.5">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <FilterPill active={status !== null}>
-              <Icon path={ICONS.status} size={14} />
+            <FilterPill
+              active={status !== null}
+              icon={ICONS.status}
+              removeLabel="Remove the status filter"
+              onRemove={() => setStatus(null)}
+            >
               {status === null ? "Status" : `Status: ${status.replace(/_/g, " ")}`}
             </FilterPill>
           </DropdownMenuTrigger>
@@ -3306,8 +3281,7 @@ function PipelinesView({
         {projects.length > 1 ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <FilterPill active>
-                <Icon path={ICONS.folder} size={14} />
+              <FilterPill active icon={ICONS.folder}>
                 {shortProject(project)}
               </FilterPill>
             </DropdownMenuTrigger>
@@ -3324,9 +3298,7 @@ function PipelinesView({
           </DropdownMenu>
         ) : null}
         {status !== null ? (
-          <GhostButton className="h-7 px-2" onClick={() => setStatus(null)}>
-            Reset
-          </GhostButton>
+          <ResetButton onClick={() => setStatus(null)} />
         ) : null}
       </div>
       <div className="overflow-x-auto">
@@ -3353,7 +3325,7 @@ function PipelinesView({
             {error !== null ? (
               <tr>
                 <td colSpan={6} className="py-4">
-                  <Callout icon="⚠️">{error}</Callout>
+                  <ErrorCallout error={error} />
                 </td>
               </tr>
             ) : data === null ? (
@@ -3581,40 +3553,20 @@ function BranchesView({
       <div className="flex flex-wrap items-center gap-1 pb-1.5" role="tablist">
         <DatabaseTabs active="branches" navigate={navigate} />
         <span className="flex-1" />
-        <span className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-muted-foreground">
-          <Icon path={ICONS.search} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search branches…"
-            aria-label="Search branches"
-            spellCheck={false}
-            className="w-44 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
-          />
-        </span>
+        <SearchField value={search} onChange={setSearch} placeholder="Search branches…" label="Search branches" />
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 pb-2">
+      <UnderlineTabs label="Branch views" className="mt-2">
         {filters.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            aria-pressed={filter === entry.id}
-            onClick={() => setFilter(entry.id)}
-            className={cn(
-              "inline-flex h-7 items-center rounded-full border px-2.5 text-sm transition-colors",
-              filter === entry.id
-                ? "border-transparent bg-foreground/[0.08] font-medium text-foreground"
-                : "border-border text-muted-foreground hover:bg-state-hover hover:text-foreground",
-            )}
-          >
+          <UnderlineTab key={entry.id} active={filter === entry.id} onClick={() => setFilter(entry.id)}>
             {entry.label}
-          </button>
+          </UnderlineTab>
         ))}
+      </UnderlineTabs>
+      <div className="flex flex-wrap items-center gap-1.5 py-2.5 empty:hidden">
         {projects.length > 1 ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <FilterPill active>
-                <Icon path={ICONS.folder} size={14} />
+              <FilterPill active icon={ICONS.folder}>
                 {shortProject(project)}
               </FilterPill>
             </DropdownMenuTrigger>
@@ -3659,7 +3611,7 @@ function BranchesView({
             {error !== null ? (
               <tr>
                 <td colSpan={7} className="py-4">
-                  <Callout icon="⚠️">{error}</Callout>
+                  <ErrorCallout error={error} />
                 </td>
               </tr>
             ) : branches === null ? (
@@ -3932,22 +3884,25 @@ function ThreadCard({
     .replace(/\s+/g, " ")
     .trim();
   const authors = [...new Set(discussion.notes.map((note) => note.author).filter((name) => name.length > 0))];
-  const footerRow = "flex items-center gap-2 border-t border-border/70 py-2.5 pl-11 pr-3";
 
+  // One grid for the whole card: 16px card padding, and the text column starts
+  // 48px in (16px padding + 24px avatar + 8px gap). Reactions, the reply field
+  // and the footer labels all start there.
+  const footer = "flex items-center gap-2 border-t border-border/70 py-3 pl-12 pr-4";
   return (
-    <div className="overflow-hidden rounded-[10px] shadow-[inset_0_0_0_1px_var(--border)]">
+    <div className={cn(CARD, "overflow-hidden")}>
       <button
         type="button"
         aria-expanded={expanded}
         onClick={toggle}
         className={cn(
-          "flex min-h-10 w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-state-hover",
+          "flex min-h-10 w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm transition-colors hover:bg-foreground/[0.06]",
           expanded && "border-b border-border/70",
         )}
       >
         <ToggleCaret open={expanded} />
         {place !== null ? (
-          <span className="max-w-[40%] shrink truncate font-mono text-[12.5px] text-muted-foreground" title={place}>
+          <span className="max-w-[40%] shrink truncate font-mono text-[13px] text-muted-foreground" title={place}>
             {place}
           </span>
         ) : null}
@@ -3960,9 +3915,7 @@ function ThreadCard({
         ) : null}
         <span className="min-w-0 flex-1 truncate text-muted-foreground">{summary}</span>
         {fresh > 0 ? (
-          <span className="shrink-0 rounded-full bg-[rgba(35,131,226,0.12)] px-2 text-xs font-medium text-[rgb(35,131,226)]">
-            ● {fresh} new
-          </span>
+          <Counter tone="info">{fresh} new</Counter>
         ) : null}
         <span className="flex shrink-0 -space-x-1.5">
           {authors.slice(0, 3).map((name) => (
@@ -3975,14 +3928,14 @@ function ThreadCard({
       {expanded ? (
         <>
           {discussion.notes.map((note, index) => (
-            <div key={`${note.createdAt}-${index}`} className={cn("px-3", index > 0 && "border-t border-border/60")}>
+            <div key={`${note.createdAt}-${index}`} className={cn("px-4 py-1", index > 0 && "border-t border-border/70")}>
               <CommentItem note={note} />
               {onReact !== undefined && note.id > 0 ? (
                 <ReactionBar
                   reactions={noteReactions?.[String(note.id)] ?? []}
                   fixed={false}
                   small
-                  className="pb-2 pl-8"
+                  className="pb-1.5 pl-8"
                   onToggle={(name, on) => onReact(note.id, name, on)}
                 />
               ) : null}
@@ -3990,8 +3943,8 @@ function ThreadCard({
           ))}
 
           {discussion.resolvable && discussion.resolved ? (
-            <div className={footerRow}>
-              <span className="mr-auto truncate text-[13px] text-muted-foreground">
+            <div className={footer}>
+              <span className="mr-auto truncate text-sm text-muted-foreground">
                 {discussion.resolvedBy.length > 0 ? `Resolved by ${discussion.resolvedBy}` : "Resolved"}
               </span>
               <ThreadButton disabled={resolving} onClick={toggleResolved}>
@@ -3999,7 +3952,7 @@ function ThreadCard({
               </ThreadButton>
             </div>
           ) : replying ? (
-            <div className="flex flex-col gap-2 border-t border-border/70 py-2.5 pl-11 pr-3">
+            <div className="flex flex-col gap-2 border-t border-border/70 py-3 pl-12 pr-4">
               <Textarea
                 value={body}
                 autoFocus
@@ -4014,7 +3967,7 @@ function ThreadCard({
                 }}
                 placeholder="Reply…"
                 aria-label="Reply to this thread"
-                className="min-h-[72px] resize-y border-border bg-transparent px-3 py-2 text-sm shadow-none focus-visible:ring-1"
+                className="min-h-[72px] resize-y border-border bg-background px-3 py-2 text-sm shadow-none focus-visible:ring-1"
               />
               <div className="flex items-center gap-2">
                 <PrimaryButton disabled={!ready || posting} onClick={reply} title="Reply (⌘/Ctrl+Enter)">
@@ -4030,23 +3983,25 @@ function ThreadCard({
                 </GhostButton>
                 {discussion.resolvable ? (
                   <ThreadButton className="ml-auto" disabled={resolving} onClick={toggleResolved}>
-                    ✅ Resolve
+                    <Icon path={ICONS.tick} size={15} strokeWidth={2} />
+                    Resolve
                   </ThreadButton>
                 ) : null}
               </div>
             </div>
           ) : (
-            <div className={footerRow}>
+            <div className={footer}>
               <button
                 type="button"
                 onClick={() => setReplying(true)}
-                className="h-8 min-w-0 flex-1 rounded-md px-3 text-left text-sm text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover"
+                className="h-7 min-w-0 flex-1 rounded-md bg-background px-2.5 text-left text-sm text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover"
               >
                 Reply…
               </button>
               {discussion.resolvable ? (
                 <ThreadButton disabled={resolving} onClick={toggleResolved}>
-                  ✅ Resolve
+                  <Icon path={ICONS.tick} size={15} strokeWidth={2} />
+                  Resolve
                 </ThreadButton>
               ) : null}
             </div>
@@ -4063,7 +4018,7 @@ function ThreadButton({ className, ...props }: React.ButtonHTMLAttributes<HTMLBu
     <button
       type="button"
       className={cn(
-        "inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13.5px] text-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover disabled:opacity-50",
+        "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-background px-2.5 text-sm text-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover disabled:opacity-50",
         className,
       )}
       {...props}
@@ -4162,7 +4117,7 @@ function ChangesList({ project, iid, mr }: { project: string; iid: number; mr: M
     };
   }, [rpc, project, iid, key]);
 
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null) return <ErrorCallout error={error} />;
   if (data === null) {
     return (
       <div className="flex flex-col gap-2">
@@ -4394,21 +4349,6 @@ function readinessOf(mr: MergeRequestDetail): Readiness {
   return { pipeline, review, discussions, conflicts, blockers };
 }
 
-/** Color only where something needs a person: red blocks, amber waits. */
-const TONE_CLASSES: Record<Tone, string> = {
-  ok: "border-border",
-  neutral: "border-border",
-  wait: "border-amber-500/50 bg-amber-500/[0.07]",
-  bad: "border-red-500/50 bg-red-500/[0.07]",
-};
-
-const TONE_GLYPHS: Record<Tone, { glyph: string; className: string }> = {
-  ok: { glyph: "✓", className: "text-emerald-700 [.dark_&]:text-emerald-400" },
-  neutral: { glyph: "–", className: "text-muted-foreground" },
-  wait: { glyph: "◐", className: "text-amber-700 [.dark_&]:text-amber-400" },
-  bad: { glyph: "✕", className: "text-red-700 [.dark_&]:text-red-400" },
-};
-
 function ReadinessCell({
   tone,
   caption,
@@ -4420,21 +4360,15 @@ function ReadinessCell({
   label: string;
   onClick: () => void;
 }) {
-  const glyph = TONE_GLYPHS[tone];
   return (
     <button
       type="button"
       onClick={onClick}
-      className={cn(
-        "flex min-w-0 flex-col gap-0.5 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-state-hover",
-        TONE_CLASSES[tone],
-      )}
+      className={cn(CARD, "flex min-w-0 flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-state-hover")}
     >
       <span className="truncate text-xs text-muted-foreground">{caption}</span>
-      <span className="flex min-w-0 items-center gap-1.5 font-semibold text-foreground">
-        <span aria-hidden="true" className={cn("font-bold", glyph.className)}>
-          {glyph.glyph}
-        </span>
+      <span className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-foreground">
+        <StatusIcon tone={tone} />
         <span className="truncate first-letter:uppercase">{label}</span>
       </span>
     </button>
@@ -4453,7 +4387,7 @@ function BlockerCard({
 }) {
   const busy = actions.busy === `job-${job.id}`;
   return (
-    <div className="overflow-hidden rounded-lg border border-red-500/40">
+    <div className="overflow-hidden rounded-[10px] shadow-[inset_0_0_0_1px_rgba(239,68,68,0.4)]">
       <div className="flex min-h-9 items-center gap-2 bg-red-500/[0.07] px-3 py-1.5">
         <PipelineStatus status={job.rawStatus} />
         <span className="min-w-0 flex-1 truncate font-mono text-[13px] font-semibold" title={job.name}>
@@ -4487,12 +4421,12 @@ function BlockerCard({
 function ApprovalBadge({ via }: { via: "approval" | "reaction" | null }) {
   return via !== null ? (
     <span className="inline-flex items-center gap-1 text-xs text-emerald-700 [.dark_&]:text-emerald-400">
-      <span aria-hidden="true" className="font-bold">{via === "reaction" ? "👍" : "✓"}</span>
+      {via === "reaction" ? <span aria-hidden="true">👍</span> : <Icon path={ICONS.tick} size={13} strokeWidth={2.2} />}
       Approved
     </span>
   ) : (
     <span className="inline-flex items-center gap-1 text-xs text-amber-700 [.dark_&]:text-amber-400">
-      <span aria-hidden="true">◐</span>
+      <Icon path={ICONS.circleClock} size={13} strokeWidth={2} />
       Pending
     </span>
   );
@@ -4645,11 +4579,17 @@ function ReviewLine({
     <span
       key={`${username}-${mark}`}
       title={title}
-      className="inline-flex items-center gap-1.5 rounded-full border border-border py-0.5 pl-0.5 pr-2 text-sm"
+      className="inline-flex h-7 items-center gap-1.5 rounded-full pl-1 pr-2.5 text-sm shadow-[inset_0_0_0_1px_var(--border)]"
     >
       <Avatar username={username} size={20} />
       <span className="max-w-[160px] truncate">{username}</span>
-      <span aria-hidden="true" className={cn("font-bold", tone)}>{mark}</span>
+      {mark === "✓" ? (
+        <Icon path={ICONS.tick} size={14} strokeWidth={2.2} className={tone} />
+      ) : mark === "◐" ? (
+        <Icon path={ICONS.circleClock} size={14} strokeWidth={2} className={tone} />
+      ) : (
+        <span aria-hidden="true">{mark}</span>
+      )}
     </span>
   );
   const nobody =
@@ -4837,13 +4777,18 @@ function MergeDialog({
                 />
               ))
             : null}
-          <p className="flex flex-wrap items-center gap-1.5 px-1 pt-1 text-sm text-muted-foreground">
-            <CopyText value={mr.sourceBranch} />
-            <span>→</span>
-            <CopyText value={mr.targetBranch} />
-            <span>at commit</span>
-            <CopyText value={mr.headSha} variant="plain" className="text-foreground">{mr.headSha.slice(0, 8)}</CopyText>
-          </p>
+          <div className="flex flex-col gap-1 px-1 pt-1 text-sm text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="w-10 shrink-0">From</span>
+              <span className="min-w-0 truncate"><CopyText value={mr.sourceBranch} /></span>
+            </span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="w-10 shrink-0">Into</span>
+              <span className="min-w-0 truncate"><CopyText value={mr.targetBranch} /></span>
+              <span className="shrink-0">at</span>
+              <CopyText value={mr.headSha} variant="plain" className="shrink-0 text-foreground">{mr.headSha.slice(0, 8)}</CopyText>
+            </span>
+          </div>
           <div className={DIALOG_LIST}>
             {pipelineRunning
               ? checkbox(
@@ -4862,7 +4807,7 @@ function MergeDialog({
           </div>
         </div>
         <DialogFooter className={DIALOG_FOOTER}>
-          <GhostButton onClick={() => onOpenChange(false)}>Cancel</GhostButton>
+          <SecondaryButton onClick={() => onOpenChange(false)}>Cancel</SecondaryButton>
           <PrimaryButton disabled={!canConfirm} onClick={confirm}>
             {merging ? "Merging…" : whenGreen && pipelineRunning ? "Merge when green" : "Merge"}
           </PrimaryButton>
@@ -4952,10 +4897,10 @@ function usePromotion(project: string, iid: number, headSha: string) {
 
 type PromotionState = ReturnType<typeof usePromotion>;
 
-const PROMOTION_LABEL: Record<PromotionCommitView["status"], { text: string; className: string }> = {
-  promoted: { text: "✅ Picked", className: "bg-[rgb(219,237,219)] text-[rgb(28,56,41)] [.dark_&]:bg-[rgb(36,61,48)] [.dark_&]:text-[rgb(108,194,140)]" },
-  missing: { text: "⭕ Not picked", className: "bg-[rgb(253,236,200)] text-[rgb(64,44,27)] [.dark_&]:bg-[rgb(86,67,40)] [.dark_&]:text-[rgb(230,190,110)]" },
-  unknown: { text: "❓ Unclear", className: "bg-foreground/[0.06] text-foreground/80" },
+const PROMOTION_LABEL: Record<PromotionCommitView["status"], { text: string; className: string; icon: string }> = {
+  promoted: { text: "Picked", icon: ICONS.circleCheck, className: "bg-emerald-600/15 text-emerald-800 [.dark_&]:bg-emerald-400/20 [.dark_&]:text-emerald-200" },
+  missing: { text: "Not picked", icon: ICONS.circleClock, className: "bg-amber-500/20 text-amber-900 [.dark_&]:bg-amber-400/20 [.dark_&]:text-amber-200" },
+  unknown: { text: "Unclear", icon: ICONS.circleDot, className: "bg-foreground/[0.07] text-foreground/80" },
 };
 
 function Spinner() {
@@ -4974,25 +4919,27 @@ function PromotionCell({ promo, onClick }: { promo: PromotionState; onClick: () 
   const promoted = commits.filter((c) => c.status === "promoted").length;
   const missing = commits.filter((c) => c.status === "missing").length;
   let value: string;
-  if (promo.error !== null && data === null) value = "❓ Error";
-  else if (data === null) value = "⏳ Checking…";
-  else if (!data.targetExists) value = "— No such branch";
-  else if (commits.length === 0) value = "— No commits";
-  else value = `${promoted === commits.length ? "✅" : missing > 0 ? "🟡" : "❓"} ${promoted} of ${commits.length}`;
+  let tone: "ok" | "bad" | "wait" | "neutral";
+  if (promo.error !== null && data === null) { value = "Error"; tone = "bad"; }
+  else if (data === null) { value = "Checking…"; tone = "neutral"; }
+  else if (!data.targetExists) { value = "No such branch"; tone = "neutral"; }
+  else if (commits.length === 0) { value = "No commits"; tone = "neutral"; }
+  else {
+    value = `${promoted} of ${commits.length}`;
+    tone = promoted === commits.length ? "ok" : missing > 0 ? "wait" : "neutral";
+  }
   return (
     <button
       type="button"
       onClick={onClick}
       title={promo.error ?? undefined}
-      className={cn(
-        "flex min-w-0 flex-col gap-0.5 rounded-md px-3 py-2 text-left transition-colors",
-        missing > 0
-          ? "bg-[rgb(253,236,200)] hover:brightness-[.98] [.dark_&]:bg-[rgb(86,67,40)]"
-          : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
-      )}
+      className={cn(CARD, "flex min-w-0 flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-state-hover")}
     >
       <span className="truncate text-xs text-muted-foreground">Cherry-picked to {promo.target}</span>
-      <span className="truncate font-semibold text-foreground">{value}</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-foreground">
+        <StatusIcon tone={tone} />
+        <span className="truncate">{value}</span>
+      </span>
     </button>
   );
 }
@@ -5240,7 +5187,7 @@ function CommitsTab({
           Pick a branch above to see which of these commits were cherry-picked to it. A default can be set in the plugin settings.
         </p>
       ) : promo.error !== null && data === null ? (
-        <Callout icon="⚠️">{promo.error}</Callout>
+        <ErrorCallout error={promo.error} />
       ) : data === null ? (
         <div className="flex flex-col gap-2 py-2">
           {[0, 1, 2].map((row) => <Skeleton key={row} className="h-10 w-full" />)}
@@ -5301,7 +5248,8 @@ function CommitsTab({
                         {asking === commit.sha ? <Spinner /> : "⚡"} Agent
                       </button>
                     </span>
-                    <span className={cn("ml-1 inline-flex h-5 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[13px]", label.className)}>
+                    <span className={cn("ml-1 inline-flex h-5 items-center whitespace-nowrap rounded px-1.5 text-xs", label.className)}>
+                      <Icon path={label.icon} size={12} strokeWidth={2} className="mr-1" />
                       {label.text}
                     </span>
                     <button
@@ -5390,7 +5338,7 @@ function CommitsTab({
                 .filter((c) => confirm?.includes(c.sha))
                 .map((c) => (
                   <div key={c.sha} className="flex min-w-0 items-center gap-2.5 px-3 py-1.5 text-sm">
-                    <span className="shrink-0 font-mono text-[12.5px] text-muted-foreground">{c.sha.slice(0, 8)}</span>
+                    <span className="shrink-0 font-mono text-[13px] text-muted-foreground">{c.sha.slice(0, 8)}</span>
                     <span className="min-w-0 truncate">{c.title}</span>
                   </div>
                 ))}
@@ -5416,9 +5364,9 @@ function CommitsTab({
             })()}
           </div>
           <DialogFooter className={DIALOG_FOOTER}>
-            <GhostButton data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
+            <SecondaryButton data-cancel="" disabled={starting} onClick={() => setConfirm(null)}>
               Cancel
-            </GhostButton>
+            </SecondaryButton>
             <PrimaryButton disabled={starting} onClick={() => confirm !== null && startPick(confirm)}>
               {starting ? "Starting…" : "Start cherry-pick"}
             </PrimaryButton>
@@ -5470,13 +5418,11 @@ function ApproveButton({
       onClick={change}
       title={approved ? "You approved this merge request. Click to take it back." : `Approve the commit ${mr.headSha.slice(0, 8)} you are looking at`}
       className={cn(
-        "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors disabled:opacity-50",
-        approved
-          ? "text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover hover:text-foreground"
-          : "bg-[rgb(35,131,226)] text-white hover:bg-[rgb(0,117,211)]",
+        "inline-flex h-7 items-center gap-1.5 rounded-md bg-background px-2.5 text-sm transition-colors hover:bg-state-hover disabled:opacity-50 shadow-[inset_0_0_0_1px_var(--border)]",
+        approved ? "text-muted-foreground hover:text-foreground" : "text-foreground",
       )}
     >
-      {busy ? <Spinner /> : <span aria-hidden="true">{approved ? "↩" : "✓"}</span>}
+      {busy ? <Spinner /> : approved ? <span aria-hidden="true">↩</span> : <Icon path={ICONS.tick} size={15} strokeWidth={2} />}
       {approved ? "Unapprove" : "Approve"}
     </button>
   );
@@ -5508,8 +5454,8 @@ function MergeButton({
         title={allowance.allowed ? undefined : allowance.reason ?? undefined}
         onClick={onMerge}
         className={cn(
-          "inline-flex h-8 items-center rounded-md px-3 text-sm font-medium text-white transition-colors disabled:opacity-40",
-          red ? "bg-[rgb(212,76,71)] hover:bg-[rgb(190,62,58)]" : "bg-[rgb(68,131,97)] hover:bg-[rgb(56,114,83)]",
+          "inline-flex h-7 items-center rounded-md px-2.5 text-sm font-medium text-white transition-colors disabled:opacity-40",
+          red ? "bg-[rgb(212,76,71)] hover:bg-[rgb(190,62,58)]" : "bg-blue-600 hover:bg-blue-700",
         )}
       >
         {red || readiness.blockers.length > 0 ? "Merge…" : "Merge"}
@@ -5721,7 +5667,7 @@ function MergeRequestDetailView({
   const promo = usePromotion(project, iid, mrState?.headSha ?? "");
 
   // A failed refresh keeps the page that was already loaded.
-  if (error !== null && mrState === null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null && mrState === null) return <ErrorCallout error={error} onRetry={load} />;
   if (mrState === null) return <PageSkeleton />;
 
   const mrLinks = links[linkKey("mr", project, iid)];
@@ -5837,7 +5783,7 @@ function MergeRequestDetailView({
             </span>
           ) : readiness.blockers.length === 0 ? (
             <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-700 [.dark_&]:text-emerald-400">
-              <span aria-hidden="true" className="font-bold">✓</span>
+              <StatusIcon tone="ok" />
               Ready to merge
             </span>
           ) : readiness.conflicts.tone === "wait" && readiness.blockers.length === 1 ? (
@@ -5890,37 +5836,16 @@ function MergeRequestDetailView({
             setTimeout(load, 1500);
           }}
         />
-        <div className="mb-4 flex gap-0.5 overflow-x-auto border-b border-border/70" role="tablist">
+        <UnderlineTabs label="Merge request" className="mb-4">
           {tabs.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === entry.id}
-              onClick={() => setTab(entry.id)}
-              className={cn(
-                "-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 pb-2 pt-1.5 text-sm transition-colors",
-                tab === entry.id
-                  ? "border-foreground font-semibold text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
+            <UnderlineTab key={entry.id} active={tab === entry.id} onClick={() => setTab(entry.id)}>
               {entry.label}
               {entry.badge !== undefined ? (
-                <span
-                  className={cn(
-                    "rounded-full px-1.5 text-[11.5px] font-medium leading-[18px]",
-                    entry.badge.bad
-                      ? "bg-red-500/15 text-red-800 [.dark_&]:text-red-300"
-                      : "bg-foreground/[0.08] text-muted-foreground",
-                  )}
-                >
-                  {entry.badge.text}
-                </span>
+                <Counter tone={entry.badge.bad ? "bad" : "neutral"}>{entry.badge.text}</Counter>
               ) : null}
-            </button>
+            </UnderlineTab>
           ))}
-        </div>
+        </UnderlineTabs>
 
         {tab === "commits" ? (
           <CommitsTab project={project} iid={iid} promo={promo} />
@@ -5955,11 +5880,8 @@ function MergeRequestDetailView({
                 </section>
                 {unresolved.length > 0 ? (
                   <section className="flex flex-col gap-2">
-                    <h2 className="text-base font-semibold text-foreground">
-                      Unresolved{" "}
-                      <span className="rounded-full bg-red-500/15 px-1.5 text-[11.5px] font-medium text-red-800 [.dark_&]:text-red-300">
-                        {unresolved.length}
-                      </span>
+                    <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+                      Unresolved <Counter tone="bad">{unresolved.length}</Counter>
                     </h2>
                     <div className="flex flex-col gap-3">
                       {unresolved.slice(0, 5).map((discussion) => (
@@ -6132,7 +6054,7 @@ function MergeRequestPickerList({
   onPick: (project: string, iid: number) => void;
 }) {
   const { items, error } = useItems({ kind: "mr", state: "open" });
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null) return <ErrorCallout error={error} />;
   if (items === null) return <ListSkeleton />;
   if (items.length === 0) {
     return (
@@ -6266,7 +6188,7 @@ function NewIssueForm({
           </>
         }
       />
-      <article className="mx-auto w-full max-w-[708px] pt-12">
+      <article className="mx-auto w-full max-w-[960px] pb-8 pt-8">
         <input
           type="text"
           value={title}
@@ -6275,7 +6197,7 @@ function NewIssueForm({
           placeholder="Untitled"
           aria-label="Issue title"
           autoFocus
-          className="w-full border-none bg-transparent pb-2 text-[40px] font-bold leading-[1.2] text-foreground placeholder:text-muted-foreground/30 focus:outline-none"
+          className="w-full border-none bg-transparent pb-2 text-[32px] font-bold leading-[1.2] text-foreground placeholder:text-muted-foreground/30 focus:outline-none"
         />
         <div className="flex flex-col gap-0.5 py-1.5">
           <PropertyRow
@@ -6393,26 +6315,16 @@ function RefreshIcon({ className }: { className?: string }) {
 const QUERY_KEY = "gitlab-ui:query";
 const DEFAULT_QUERY = "is:open ";
 
-/** Shown whenever `glab` is missing or logged out. */
+/** Shown whenever `glab` is missing, logged out, or cannot reach its host. */
 function StatusBanner({ error }: { error: string | null }) {
   return (
-    <Callout icon="⚠️" className="mb-6">
-      <p className="font-medium text-foreground">
-        The GitLab CLI is not available or not authenticated
-      </p>
-      <p className="text-muted-foreground">
-        Install glab from gitlab.com/gitlab-org/cli, run{" "}
-        <code className="rounded bg-foreground/[0.06] px-1 py-0.5 font-mono text-[13px] text-foreground">
-          glab auth login
-        </code>
-        , then reload the plugin. Cached items stay readable; edits fail until
-        then.
-      </p>
-      {error !== null && error.length > 0 ? (
-        <p className="whitespace-pre-wrap pt-1 font-mono text-xs text-red-700 [.dark_&]:text-red-400">
-          {error}
-        </p>
-      ) : null}
+    <Callout icon="⚠️" tone="warn" className="mb-6" {...(error !== null && error.length > 0 ? { details: error } : {})}>
+      <div className="font-semibold text-foreground">Can&apos;t reach GitLab</div>
+      <div className="text-muted-foreground">
+        Check the VPN. If it is on, run{" "}
+        <code className="rounded bg-foreground/[0.07] px-1 py-0.5 font-mono text-[13px] text-foreground">glab auth login</code>{" "}
+        and reload the plugin. Cached items stay readable; edits fail until then.
+      </div>
     </Callout>
   );
 }
@@ -6431,7 +6343,7 @@ function GitlabRoutedBody({
   onQuery: (query: string) => void;
 }) {
   const projects = status?.projects ?? [];
-  if (status !== null && status.projects.length === 0) {
+  if (status !== null && status.glabOk && status.projects.length === 0) {
     return (
       <Callout icon="💡">
         No GitLab projects tracked yet. Create a BB project whose checkout has a
@@ -6606,7 +6518,7 @@ function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
     { people: false },
   );
 
-  if (error !== null) return <Callout icon="⚠️">{error}</Callout>;
+  if (error !== null) return <ErrorCallout error={error} />;
   if (items === null) return <ListSkeleton />;
   if (items.length === 0) {
     return <EmptyState message="No open GitLab issues." className="py-6" />;
@@ -6686,7 +6598,7 @@ interface ContributionCalendarData {
   totalCommits: number;
   projects: number;
   complete: boolean;
-  days: { date: string; count: number; additions: number; deletions: number }[];
+  days: { date: string; count: number; additions: number; deletions: number; projects?: { name: string; count: number }[] }[];
 }
 
 const CONTRIBUTION_LEVELS = [
@@ -6705,10 +6617,59 @@ function contributionLevel(count: number): number {
   return 4;
 }
 
-function ContributionGrid({ weeks, endDate }: {
+type ContributionDayData = ContributionCalendarData["days"][number];
+
+/** "Thu, Sep 3, 2026" for a yyyy-mm-dd key, read as a calendar date. */
+function formatDayKey(date: string): string {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString("en-US", {
+    weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
+  });
+}
+
+/** The dark hover card over a heatmap day: commits, lines, projects. */
+function ContributionTooltip({ date, day, anchor }: { date: string; day: ContributionDayData | undefined; anchor: DOMRect }) {
+  const number = new Intl.NumberFormat("en-US");
+  const count = day?.count ?? 0;
+  const projects = day?.projects ?? [];
+  return (
+    <div
+      role="tooltip"
+      style={{ left: anchor.left + anchor.width / 2, top: anchor.top - 8 }}
+      className="pointer-events-none fixed z-50 min-w-[180px] -translate-x-1/2 -translate-y-full rounded-lg bg-[#2f2f2f] px-2.5 py-2 text-xs leading-[1.45] text-white shadow-[0_4px_14px_rgba(0,0,0,.25)] [.dark_&]:bg-[#3a3a3a] [.dark_&]:shadow-[0_0_0_1px_rgba(255,255,255,.08),0_4px_14px_rgba(0,0,0,.5)]"
+    >
+      <div className="text-[13px] font-semibold">
+        {count === 0 ? "No commits" : `${number.format(count)} commit${count === 1 ? "" : "s"}`}
+      </div>
+      <div className="text-white/60">{formatDayKey(date)}</div>
+      {count > 0 ? (
+        <div className="mt-0.5 flex gap-2.5 tabular-nums">
+          <span className="text-[#7fd19b]">+{number.format(day?.additions ?? 0)}</span>
+          <span className="text-[#f09a95]">−{number.format(day?.deletions ?? 0)}</span>
+          <span className="text-white/60">lines</span>
+        </div>
+      ) : null}
+      {projects.length > 0 ? (
+        <div className="mt-1.5 flex flex-col gap-px border-t border-white/[0.12] pt-1.5">
+          {projects.slice(0, 4).map((entry) => (
+            <span key={entry.name} className="flex justify-between gap-3">
+              <span className="truncate">{entry.name}</span>
+              <span className="tabular-nums text-white/60">{entry.count}</span>
+            </span>
+          ))}
+          {projects.length > 4 ? <span className="text-white/60">+{projects.length - 4} more</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ContributionGrid({ weeks, endDate, days }: {
   weeks: Array<Array<{ date: string; count: number; inRange: boolean }>>;
   endDate: string;
+  days: ContributionCalendarData["days"];
 }) {
+  const byDate = useMemo(() => new Map(days.map((day) => [day.date, day])), [days]);
+  const [hover, setHover] = useState<{ date: string; anchor: DOMRect } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridWidth, setGridWidth] = useState(0);
   useEffect(() => {
@@ -6734,7 +6695,7 @@ function ContributionGrid({ weeks, endDate }: {
   });
 
   return (
-    <div className="flex min-w-0 gap-2" aria-hidden="true">
+    <div className="flex min-w-0 gap-2" onMouseLeave={() => setHover(null)}>
       <div className="grid shrink-0 grid-rows-7 gap-[2px] pt-[22px] text-[10px] leading-none text-muted-foreground">
         {["", "Mon", "", "Wed", "", "Fri", ""].map((day, index) => <span key={index} className="flex w-6 items-center">{day}</span>)}
       </div>
@@ -6748,14 +6709,21 @@ function ContributionGrid({ weeks, endDate }: {
               {week.map((day) => (
                 <span
                   key={day.date}
-                  title={day.inRange ? `${day.date}: ${day.count} commit${day.count === 1 ? "" : "s"}` : undefined}
-                  className={cn("aspect-square w-full rounded-[2px]", day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent", day.date === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background")}
+                  aria-label={day.inRange ? `${formatDayKey(day.date)}: ${day.count} commit${day.count === 1 ? "" : "s"}` : undefined}
+                  onMouseEnter={day.inRange ? (event) => setHover({ date: day.date, anchor: event.currentTarget.getBoundingClientRect() }) : undefined}
+                  className={cn(
+                    "aspect-square w-full rounded-[2px]",
+                    day.inRange ? CONTRIBUTION_LEVELS[contributionLevel(day.count)] : "bg-transparent",
+                    day.date === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background",
+                    hover?.date === day.date && "outline outline-[1.5px] outline-offset-1 outline-foreground",
+                  )}
                 />
               ))}
             </div>
           ))}
         </div>
       </div>
+      {hover !== null ? <ContributionTooltip date={hover.date} day={byDate.get(hover.date)} anchor={hover.anchor} /> : null}
     </div>
   );
 }
@@ -6777,7 +6745,7 @@ function ContributionCalendar({ host }: { host: string | null }) {
   if (host === null) return null;
   if (data === null) {
     return (
-      <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Your GitLab commits">
+      <section className={cn(CARD, "px-4 py-3")} aria-label="Your GitLab commits">
         <div className="mb-3 text-sm font-semibold text-foreground">Your commits</div>
         {error ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Could not load your activity.</span><Button size="sm" variant="ghost" onClick={load}>Retry</Button></div> : <Skeleton className="h-32 w-full" />}
       </section>
@@ -6834,39 +6802,26 @@ function ContributionSummary({
   ];
 
   return (
-    <section className="rounded-[10px] border border-border px-4 py-3" aria-label="Your GitLab commits">
+    <section className={cn(CARD, "px-4 py-3")} aria-label="Your GitLab commits">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <span className="text-sm font-semibold text-foreground">Your commits</span>
-        <div role="tablist" aria-label="Period" className="inline-flex rounded-lg bg-foreground/[0.06] p-0.5">
-          {CONTRIBUTION_PERIODS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="tab"
-              aria-selected={entry.id === chosen.id}
-              onClick={() => setPeriod(entry.id)}
-              className={cn(
-                "h-6 rounded-md px-2.5 text-xs transition-colors",
-                entry.id === chosen.id
-                  ? "bg-background font-medium text-foreground shadow-[0_1px_2px_rgba(15,15,15,.1),0_0_0_1px_rgba(15,15,15,.04)]"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          label="Period"
+          value={chosen.id}
+          options={CONTRIBUTION_PERIODS.map((entry) => ({ value: entry.id, label: entry.label }))}
+          onChange={setPeriod}
+        />
       </div>
       <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {stats.map((stat) => (
-          <div key={stat.label} className="min-w-0 rounded-lg px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)]">
-            <div className="truncate text-[12px] text-muted-foreground">{stat.label}</div>
+          <div key={stat.label} className="min-w-0 rounded-[10px] bg-background px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)]">
+            <div className="truncate text-xs text-muted-foreground">{stat.label}</div>
             <div className={cn("text-lg font-semibold tabular-nums text-foreground", stat.tone)}>{stat.value}</div>
           </div>
         ))}
       </div>
-      <ContributionGrid weeks={weeks} endDate={data.endDate} />
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+      <ContributionGrid weeks={weeks} endDate={data.endDate} days={data.days} />
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>
           {error
             ? "Could not refresh; showing the last load."
@@ -6957,7 +6912,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   useRealtime("data-changed", load);
 
   if (settings.homeLayout === "off" || groups.length === 0) return null;
-  if (wantsMrs && items === null) return <div className="flex flex-col gap-3">{heatmap}{error !== null ? <Callout icon="⚠️">{error}</Callout> : <ListSkeleton />}</div>;
+  if (wantsMrs && items === null) return <div className="flex flex-col gap-3">{heatmap}{error !== null ? <ErrorCallout error={error} /> : <ListSkeleton />}</div>;
 
   // Rows per group, from the one MR answer and the cached issues.
   const splitDrafts = groups.includes("drafts");
@@ -7007,7 +6962,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
               }}
               className="group relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 outline-none transition-colors hover:bg-state-hover focus-visible:bg-state-hover"
             >
-              <span className="shrink-0 text-[13px] text-muted-foreground">
+              <span className="shrink-0 font-mono text-[13px] text-muted-foreground">
                 {MARKER[row.kind]}
                 {row.iid}
               </span>
@@ -7015,7 +6970,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
                 {row.title}
               </span>
               {row.reason !== null ? (
-                <span className={cn("hidden h-5 shrink-0 items-center whitespace-nowrap rounded-[3px] px-1.5 text-[12.5px] sm:inline-flex", HOME_TONE[row.reason.tone])}>
+                <span className={cn("hidden h-5 shrink-0 items-center whitespace-nowrap rounded px-1.5 text-xs sm:inline-flex", HOME_TONE[row.reason.tone])}>
                   {row.reason.text}
                 </span>
               ) : (
@@ -7024,13 +6979,13 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
                 </span>
               )}
               <Avatar username={row.author} size={18} />
-              <span className="w-9 shrink-0 text-right text-[12.5px] text-muted-foreground/70" title={formatDateTime(row.updatedAt)}>
+              <span className="w-9 shrink-0 text-right text-xs text-muted-foreground/70" title={formatDateTime(row.updatedAt)}>
                 {relativeTime(row.updatedAt).replace(" ago", "")}
               </span>
               <span className="absolute right-1.5 flex gap-0.5 rounded-md bg-background opacity-0 shadow-[0_0_0_1px_var(--border)] transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
                 <button
                   type="button"
-                  className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
+                  className="h-7 rounded px-2 text-sm text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground"
                   onClick={(event) => {
                     event.stopPropagation();
                     open(row);
@@ -7041,7 +6996,7 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
                 <button
                   type="button"
                   disabled={spawningKey !== null}
-                  className="h-7 rounded px-2 text-[13px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50"
+                  className="h-7 rounded px-2 text-sm text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground disabled:opacity-50"
                   title={row.kind === "mr" ? "Review with an agent" : "Send an agent to this issue"}
                   onClick={(event) => {
                     event.stopPropagation();
@@ -7081,9 +7036,8 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" className={cn("shrink-0 text-muted-foreground transition-transform", closed && "-rotate-90")}>
                   <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
                 </svg>
-                <span aria-hidden="true">{HOME_GROUPS[id].emoji}</span>
                 <span className="text-sm font-semibold text-foreground">{HOME_GROUPS[id].label}</span>
-                <span className="rounded-full bg-foreground/[0.07] px-1.5 text-xs text-muted-foreground">{rows.length}</span>
+                <Counter>{rows.length}</Counter>
               </button>
               {closed ? null : <div className="pb-1 pl-[22px]">{list(id, rows)}</div>}
             </div>
@@ -7117,14 +7071,14 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
               aria-selected={on}
               onClick={() => setPicked(id)}
               className={cn(
-                "flex min-w-0 flex-col items-start rounded-[10px] px-3 py-2.5 text-left transition-colors",
+                "flex min-w-0 flex-col items-start gap-0.5 rounded-[10px] px-3 py-2.5 text-left transition-colors",
                 on
-                  ? "bg-[rgba(35,131,226,.1)] shadow-[inset_0_0_0_2px_rgb(35,131,226)]"
-                  : "shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover",
+                  ? "bg-blue-600/[0.08] shadow-[inset_0_0_0_1.5px_rgb(37,99,235)] [.dark_&]:bg-blue-400/10 [.dark_&]:shadow-[inset_0_0_0_1.5px_rgb(96,165,250)]"
+                  : cn(CARD, "hover:bg-state-hover"),
               )}
             >
-              <span className="w-full truncate text-[12.5px] text-muted-foreground">
-                {HOME_GROUPS[id].emoji} {HOME_GROUPS[id].label}
+              <span className="w-full truncate text-xs text-muted-foreground">
+                {HOME_GROUPS[id].label}
               </span>
               <span className={cn("text-2xl font-bold leading-tight", rows.length === 0 ? "text-muted-foreground/60" : "text-foreground")}>
                 {rows.length}
@@ -7171,7 +7125,12 @@ function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThread
 }
 
 function GitlabWorkflowSummary() {
-  return <span className="inline-flex h-6 items-center gap-1.5 px-1 text-sm font-medium text-foreground">🦊 GitLab</span>;
+  return (
+    <span className="inline-flex h-7 items-center gap-1.5 px-1 text-sm font-medium text-foreground">
+      <Icon path={ICONS.branch} />
+      GitLab
+    </span>
+  );
 }
 
 function GitlabWorkflowAction({ threadId, projectId, environment }: ExperimentalThreadContextSegmentProps) {
@@ -7186,6 +7145,7 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
   } | null>(null);
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const git = experimental_useRpcKeyedQuery({
     pluginId: "bb--git", contract: gitStatusContract, method: "status",
     keys: environment === null ? [] : [environment.id],
@@ -7208,11 +7168,35 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     refresh();
     const timer = window.setInterval(refresh, 20_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [rpc, projectId, branch, localHead]);
+  }, [rpc, projectId, branch, localHead, attempt]);
 
-  if (error) return <Tag color="red" className="text-xs">GitLab unavailable</Tag>;
+  const branchChip = branch !== null ? (
+    <span className="max-w-[200px] truncate rounded bg-foreground/[0.07] px-1.5 py-px font-mono text-[13px] text-muted-foreground" title={branch}>
+      {branch}
+    </span>
+  ) : null;
+  const state = (dot: string, text: string) => (
+    <span className="inline-flex min-w-0 items-center gap-1.5 truncate text-sm text-muted-foreground">
+      <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", dot)} />
+      <span className="truncate">{text}</span>
+    </span>
+  );
+  if (error) {
+    return (
+      <span className="flex min-w-0 items-center gap-2.5 font-sans">
+        {branchChip}
+        {state("bg-red-500", "Can't reach GitLab · check VPN")}
+        <SecondaryButton onClick={() => { setError(false); setAttempt((value) => value + 1); }}>Retry</SecondaryButton>
+      </span>
+    );
+  }
   if (workspace === undefined || branch === null || remote?.branch !== branch || remote.project === null) {
-    return <Tag color="gray" className="text-xs">Checking…</Tag>;
+    return (
+      <span className="flex min-w-0 items-center gap-2.5 font-sans">
+        {branchChip}
+        <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground"><Spinner /> Checking branch…</span>
+      </span>
+    );
   }
   const stage = workflowStage({
     dirty: workspace.workingTree.hasUncommittedChanges,
@@ -7250,10 +7234,33 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
       setBusy(false);
     }
   };
+  const reason = {
+    commit: state("bg-amber-500", "Uncommitted changes"),
+    push: state("bg-amber-500", remote.remoteHead === null ? "Branch is not on GitLab yet" : "Commits not pushed"),
+    "create-mr": state("bg-blue-500", "Pushed · no merge request"),
+    "open-mr": state("bg-emerald-500", "Merge request open"),
+    idle: state("bg-emerald-500", "Up to date"),
+  }[stage];
+  const focus = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500";
   return (
-    <span className="flex items-center gap-2 font-sans">
-      {remote.mergeRequestIid !== null && stage !== "open-mr" ? <Tag color="blue" className="text-xs">MR !{remote.mergeRequestIid}</Tag> : null}
-      {stage === "idle" ? <Tag color="green" className="text-xs">Done</Tag> : <PrimaryButton className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500" disabled={busy} onClick={onClick}>{labels[stage]}</PrimaryButton>}
+    <span className="flex min-w-0 items-center gap-2.5 font-sans">
+      {branchChip}
+      {remote.mergeRequestIid !== null ? <Tag color="gray" className="font-mono">!{remote.mergeRequestIid}</Tag> : null}
+      {reason}
+      {stage === "idle" ? (
+        remote.mergeRequestIid !== null ? (
+          <GhostButton
+            className={focus}
+            onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: `merge_requests/${remote.project}/${remote.mergeRequestIid}` })}
+          >
+            Open MR
+          </GhostButton>
+        ) : null
+      ) : stage === "open-mr" ? (
+        <SecondaryButton className={focus} onClick={onClick}>Open MR</SecondaryButton>
+      ) : (
+        <PrimaryButton className={focus} disabled={busy} onClick={onClick}>{labels[stage]}</PrimaryButton>
+      )}
     </span>
   );
 }
@@ -7277,7 +7284,7 @@ export default definePluginApp((app) => {
   });
   app.slots.homepageSection({
     id: "gitlab-ui-dashboard",
-    title: "🦊 GitLab",
+    title: "GitLab",
     component: (props: PluginHomepageSectionProps) => (
       <ViewerScope>
         <HomeDashboard {...props} />

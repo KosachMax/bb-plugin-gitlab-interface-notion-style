@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GitLab Interface — unified design</title>
+<style>
+:root{
+  --bg:#ffffff; --fg:#37352f; --muted:#787774; --faint:#a5a29a;
+  --s1:rgba(55,53,47,.035); --s2:rgba(55,53,47,.07); --hover:rgba(55,53,47,.06);
+  --line:rgba(55,53,47,.13); --blue:#2383e2; --blue-h:#0f6fd0; --blue-t:rgba(35,131,226,.10);
+  --green:#448361; --green-t:rgba(68,131,97,.13); --red:#d44c47; --red-t:rgba(212,76,71,.12);
+  --yellow:#c29343; --yellow-t:rgba(203,145,47,.15); --purple:#9065b0; --purple-t:rgba(144,101,176,.13);
+  --gray-t:rgba(120,119,116,.14); --shadow:0 0 0 1px rgba(15,15,15,.05),0 3px 6px rgba(15,15,15,.1),0 9px 24px rgba(15,15,15,.2);
+  --doc:#f7f6f3;
+}
+.dark{
+  --bg:#191919; --fg:#d4d4d4; --muted:#9b9b9b; --faint:#6b6b6b;
+  --s1:rgba(255,255,255,.035); --s2:rgba(255,255,255,.075); --hover:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.11); --blue:#2e86de; --blue-h:#4b9ae6; --blue-t:rgba(46,134,222,.16);
+  --green:#5fa77f; --green-t:rgba(95,167,127,.16); --red:#e06c66; --red-t:rgba(224,108,102,.16);
+  --yellow:#d6a95a; --yellow-t:rgba(214,169,90,.16); --purple:#b38ad0; --purple-t:rgba(179,138,208,.16);
+  --gray-t:rgba(255,255,255,.09); --shadow:0 0 0 1px rgba(255,255,255,.08),0 3px 6px rgba(0,0,0,.3),0 9px 24px rgba(0,0,0,.45);
+  --doc:#111;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Helvetica,sans-serif;background:var(--doc);color:var(--fg);-webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+svg{flex:none}
+
+/* report chrome (Russian notes) */
+.report{max-width:1240px;margin:0 auto;padding:32px 24px 80px}
+.report>header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.report h1.r{font-size:28px;font-weight:700}
+.lead{color:var(--muted);max-width:760px;margin-bottom:24px}
+.toggle{margin-left:auto;display:flex;gap:4px;background:var(--s2);border-radius:8px;padding:3px}
+.toggle button{height:26px;padding:0 10px;border-radius:6px;font-size:13px;color:var(--muted)}
+.toggle button.on{background:var(--bg);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+.nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 28px}
+.nav a{font-size:13px;color:var(--muted);text-decoration:none;padding:4px 10px;border-radius:999px;box-shadow:inset 0 0 0 1px var(--line);background:var(--bg)}
+.nav a:hover{color:var(--fg)}
+section.screen{margin-bottom:56px;scroll-margin-top:16px}
+.shead{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
+.shead h2{font-size:20px;font-weight:600}
+.shead span{color:var(--muted);font-size:13px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px;align-items:start}
+.notes{background:var(--bg);border-radius:10px;box-shadow:inset 0 0 0 1px var(--line);padding:14px 16px;font-size:13px;position:sticky;top:16px}
+.notes h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;margin-bottom:8px}
+.notes ol{padding-left:18px;display:flex;flex-direction:column;gap:8px}
+.notes li b{font-weight:600}
+.notes .was{color:var(--muted)}
+.frame{background:var(--bg);border-radius:12px;box-shadow:0 0 0 1px var(--line),0 8px 30px rgba(0,0,0,.06);overflow:hidden}
+
+/* ===== the design system ===== */
+.topbar{height:44px;display:flex;align-items:center;gap:2px;padding:0 12px 0 16px;border-bottom:1px solid var(--line);font-size:14px}
+.crumb{padding:2px 6px;border-radius:6px;color:var(--muted)}
+.crumb:hover{background:var(--hover);color:var(--fg)}
+.crumb.cur{color:var(--fg)}
+.sep{color:var(--faint);padding:0 1px}
+.grow{flex:1}
+.page{padding:32px 48px 40px}
+.page.doc{max-width:960px;margin:0 auto}
+h1.t-db{font-size:40px;line-height:1.2;font-weight:700;padding-bottom:20px}
+h1.t-doc{font-size:32px;line-height:1.2;font-weight:700;padding-bottom:8px}
+h2.t-sec{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.meta{color:var(--muted);font-size:14px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.row{display:flex;align-items:center;gap:6px}
+.wrap{flex-wrap:wrap}
+
+.btn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:6px;font-size:14px;white-space:nowrap;transition:background .12s}
+.btn-primary{background:var(--blue);color:#fff;font-weight:500}
+.btn-primary:hover{background:var(--blue-h)}
+.btn-secondary{background:var(--bg);box-shadow:inset 0 0 0 1px var(--line)}
+.btn-secondary:hover{background:var(--hover)}
+.btn-ghost{color:var(--muted)}
+.btn-ghost:hover{background:var(--hover);color:var(--fg)}
+.btn-danger{background:var(--red);color:#fff;font-weight:500}
+.btn-icon{width:28px;padding:0;justify-content:center}
+.btn[disabled]{opacity:.45;cursor:default}
+
+.vtabs{display:flex;gap:2px;align-items:center}
+.vtab{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:999px;color:var(--muted);font-weight:500}
+.vtab:hover{background:var(--hover);color:var(--fg)}
+.vtab.on{background:var(--s2);color:var(--fg)}
+.utabs{display:flex;gap:2px;border-bottom:1px solid var(--line)}
+.utab{display:inline-flex;align-items:center;gap:6px;padding:6px 10px 8px;margin-bottom:-1px;border-bottom:2px solid transparent;color:var(--muted)}
+.utab:hover{color:var(--fg)}
+.utab.on{border-color:var(--fg);color:var(--fg);font-weight:600}
+
+.fpill{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:999px;box-shadow:inset 0 0 0 1px var(--line);color:var(--muted)}
+.fpill:hover{background:var(--hover);color:var(--fg)}
+.fpill.on{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 40%,transparent);background:var(--blue-t);color:var(--blue)}
+.search{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border-radius:6px;color:var(--muted);width:200px}
+.search:focus-within,.search:hover{background:var(--hover)}
+.search input{border:0;background:none;outline:none;font:inherit;color:var(--fg);width:100%}
+.search input::placeholder{color:var(--faint)}
+
+.tag{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:4px;font-size:12px;white-space:nowrap;line-height:20px}
+.t-gray{background:var(--gray-t)} .t-blue{background:var(--blue-t);color:var(--blue)} .t-green{background:var(--green-t);color:var(--green)}
+.t-red{background:var(--red-t);color:var(--red)} .t-yellow{background:var(--yellow-t);color:var(--yellow)} .t-purple{background:var(--purple-t);color:var(--purple)}
+.status{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.d-green{background:var(--green)} .d-red{background:var(--red)} .d-yellow{background:var(--yellow)} .d-blue{background:var(--blue)} .d-gray{background:var(--faint)} .d-purple{background:var(--purple)}
+.counter{display:inline-flex;align-items:center;height:18px;min-width:18px;justify-content:center;padding:0 6px;border-radius:999px;font-size:12px;font-weight:500;background:var(--s2);color:var(--muted)}
+.counter.bad{background:var(--red-t);color:var(--red)}
+.counter.info{background:var(--blue-t);color:var(--blue)}
+.av{width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font-size:9px;font-weight:600;color:#fff;flex:none}
+.av.lg{width:24px;height:24px;font-size:10px}
+.person{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.code{font-family:ui-monospace,Menlo,monospace;font-size:13px;background:var(--s2);border-radius:4px;padding:1px 5px}
+
+.card{border-radius:10px;background:var(--s1);box-shadow:inset 0 0 0 1px var(--line)}
+.callout{display:flex;gap:10px;padding:12px 16px;border-radius:10px;background:var(--s1);box-shadow:inset 0 0 0 1px var(--line)}
+.callout.bad{background:var(--red-t);box-shadow:none}
+.callout.warn{background:var(--yellow-t);box-shadow:none}
+.callout .ic{font-size:16px;line-height:22px}
+.callout b{font-weight:600}
+
+table.db{width:100%;border-collapse:collapse;font-size:14px}
+table.db th{font-weight:400;color:var(--muted);text-align:left;height:34px;padding:0 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.db th span{display:inline-flex;align-items:center;gap:6px}
+table.db td{height:36px;padding:0 8px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
+table.db th+th,table.db td+td{border-left:1px solid var(--line)}
+table.db tr:hover td{background:var(--hover)}
+table.db td.name{font-weight:500}
+.foot{display:flex;align-items:center;gap:6px;height:36px;padding:0 8px;color:var(--muted)}
+.foot:hover{background:var(--hover)}
+
+.props{display:flex;flex-direction:column;gap:2px;padding:6px 0 12px}
+.prop{display:grid;grid-template-columns:160px 1fr;align-items:center;min-height:34px}
+.prop .k{display:flex;align-items:center;gap:8px;color:var(--muted);padding:0 6px}
+.prop .v{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:4px 8px;border-radius:6px;min-height:30px}
+.prop .v:hover{background:var(--hover)}
+
+.cells{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+.cell{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:10px;background:var(--s1);box-shadow:inset 0 0 0 1px var(--line);text-align:left}
+.cell:hover{background:var(--hover)}
+.cell small{font-size:12px;color:var(--muted)}
+.cell b{display:flex;align-items:center;gap:6px;font-weight:600}
+.ok{color:var(--green)} .no{color:var(--red)} .wait{color:var(--yellow)}
+
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:32px;margin-top:16px}
+.rail{display:flex;flex-direction:column;gap:20px}
+.rail h4{font-size:12px;font-weight:500;color:var(--muted);margin-bottom:6px}
+.stack{display:flex;flex-direction:column;gap:6px}
+
+/* thread card (already approved, kept as reference) */
+.thread{overflow:hidden}
+.thead{display:flex;align-items:center;gap:10px;min-height:40px;padding:10px 16px;border-bottom:1px solid var(--line)}
+.thead .place{max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.thead .sum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.cm{display:flex;gap:8px;padding:10px 16px}
+.cm+.cm{border-top:1px solid var(--line)}
+.cm .body{flex:1;min-width:0}
+.cm .who{display:flex;gap:8px;align-items:baseline}
+.cm .who b{font-weight:500}
+.cm .who span{font-size:12px;color:var(--muted)}
+.rx{display:flex;gap:4px;margin-top:6px}
+.rxb{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:999px;font-size:12px;box-shadow:inset 0 0 0 1px var(--line);background:var(--bg)}
+.rxb.mine{background:var(--blue-t);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 40%,transparent);color:var(--blue)}
+.tfoot{display:flex;gap:8px;align-items:center;padding:12px 16px 12px 48px;border-top:1px solid var(--line)}
+.reply{flex:1;height:28px;display:flex;align-items:center;padding:0 10px;border-radius:6px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);color:var(--faint)}
+
+/* home section */
+.home{max-width:760px}
+.hgroup{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px;border-radius:6px;font-weight:600}
+.hgroup:hover{background:var(--hover)}
+.hrow{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 8px 0 28px;border-radius:6px}
+.hrow:hover{background:var(--hover)}
+.hrow .id{color:var(--muted);font-size:13px;width:52px}
+.hrow .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hrow .tm{color:var(--faint);font-size:12px;width:32px;text-align:right}
+.counters{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.counters .cell b{font-size:24px;line-height:1.2}
+.heat{display:grid;grid-template-columns:repeat(26,1fr);gap:3px}
+.heat i{aspect-ratio:1;border-radius:3px;background:var(--s2)}
+.seg{display:inline-flex;background:var(--s2);border-radius:8px;padding:2px}
+.seg button{height:24px;padding:0 10px;border-radius:6px;font-size:13px;color:var(--muted)}
+.seg button.on{background:var(--bg);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+
+/* dialog */
+.overlay{background:rgba(15,15,15,.45);padding:48px 0;display:grid;place-items:center}
+.dialog{width:448px;background:var(--bg);border-radius:12px;box-shadow:var(--shadow)}
+.dhead{display:flex;gap:12px;padding:24px 24px 0}
+.dicon{width:40px;height:40px;border-radius:8px;background:var(--s2);display:grid;place-items:center;font-size:20px;flex:none}
+.dhead h3{font-size:18px;font-weight:600;line-height:1.3}
+.dhead p{color:var(--muted);margin-top:2px}
+.dbody{display:flex;flex-direction:column;gap:10px;padding:20px 24px 0}
+.dfoot{display:flex;justify-content:flex-end;gap:8px;padding:20px 24px 24px}
+
+/* tokens table */
+.tok{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.tok .card{padding:16px;background:var(--bg)}
+.tok h4{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;margin-bottom:10px}
+.tok .line{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:30px}
+.tok .line code{font-size:12px;color:var(--muted)}
+.sw{width:56px;height:28px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--line)}
+.heat{grid-template-rows:repeat(7,1fr);grid-auto-flow:column;grid-template-columns:none;grid-auto-columns:1fr}
+.heat i{cursor:default;outline-offset:1px}
+.heat i:hover{outline:1.5px solid var(--fg)}
+.tip{position:fixed;z-index:50;pointer-events:none;background:#2f2f2f;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;box-shadow:0 4px 14px rgba(0,0,0,.25);min-width:180px;transform:translate(-50%,calc(-100% - 10px))}
+.dark .tip{background:#3a3a3a;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 4px 14px rgba(0,0,0,.5)}
+.tip b{font-weight:600;font-size:13px;display:block}
+.tip .d{color:rgba(255,255,255,.6)}
+.tip .ln{display:flex;gap:10px;margin-top:2px}
+.tip .add{color:#7fd19b}.tip .del{color:#f09a95}
+.tip .pr{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.12);display:flex;flex-direction:column;gap:1px}
+.tip .pr span{display:flex;justify-content:space-between;gap:12px}
+.chatwrap{background:var(--bg);padding:20px 24px 24px;display:flex;flex-direction:column;gap:10px}
+.strip{display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 8px 8px 14px;border-radius:10px;background:var(--s1);box-shadow:inset 0 0 0 1px var(--line)}
+.strip .brand{display:inline-flex;align-items:center;gap:6px;font-weight:500}
+.strip .br{color:var(--muted)}
+.strip .hint{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.composer{border-radius:14px;box-shadow:inset 0 0 0 1px var(--line);padding:14px 16px 10px;color:var(--faint);height:104px;display:flex;flex-direction:column;justify-content:space-between}
+.composer .bot{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:13px}
+.spin{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--line);border-top-color:var(--muted);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.states{display:flex;flex-direction:column;gap:8px}
+.states .lbl{font-size:12px;color:var(--muted);margin:6px 0 -2px 2px}
+.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none;display:block}
+.fpill{line-height:1;padding:0 8px 0 10px}
+.fpill .i{width:14px;height:14px}
+.fpill .lbl{display:inline-flex;align-items:center;gap:6px;height:100%}
+.fpill .chev{width:13px;height:13px;opacity:.7}
+.fslot{position:relative;width:16px;height:16px;display:grid;place-items:center;margin:0 2px 0 -2px}
+.fpill.on{padding-left:8px}
+.fx{position:absolute;inset:-2px;display:grid;place-items:center;border-radius:50%;opacity:0;color:inherit}
+.fx .i{width:12px;height:12px;stroke-width:2.4}
+.fx:hover{background:color-mix(in srgb,currentColor 18%,transparent)}
+.fpill.on:hover .ico,.fpill.on:focus-within .ico{opacity:0}
+.fpill.on:hover .fx,.fpill.on:focus-within .fx{opacity:1}
+.btn-reset{color:var(--red)}
+.btn-reset:hover{background:var(--red-t);color:var(--red)}
+.btn .i{width:15px;height:15px}
+.cell b .i{width:16px;height:16px}
+.callout .ic .i{width:18px;height:18px;margin-top:2px}
+.hidden{display:none!important}
+.empty{display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:20px 0}
+</style>
+</head>
+<body>
+<div class="report">
+  <header>
+    <h1 class="r">Единый дизайн плагина</h1>
+    <div class="toggle"><button class="on" data-theme="light">Light</button><button data-theme="dark">Dark</button></div>
+  </header>
+  <p class="lead">Сверху — токены: один размер шрифта на роль, три фона, четыре радиуса, четыре вида кнопок, два вида табов. Ниже каждый экран собран только из них. Справа у экрана — что было и что поменялось.</p>
+  <nav class="nav">
+    <a href="#tokens">0 · Токены</a><a href="#lists">1 · Списки</a><a href="#mr">2 · Merge request</a><a href="#issue">3 · Issue</a><a href="#pipeline">4 · Pipeline</a><a href="#home">5 · Home</a><a href="#dialog">6 · Диалог</a><a href="#states">7 · Ошибки и пустые</a><a href="#chat">8 · Строка над чатом</a>
+  </nav>
+
+  <!-- 0 TOKENS -->
+  <section class="screen" id="tokens">
+    <div class="shead"><h2>0 · Токены</h2><span>всё, из чего собраны экраны</span></div>
+    <div class="tok">
+      <div class="card">
+        <h4>Типографика</h4>
+        <div class="line"><span style="font-size:40px;font-weight:700;line-height:1.1">GitLab</span><code>40 · title списков</code></div>
+        <div class="line"><span style="font-size:32px;font-weight:700;line-height:1.2">!4629</span><code>32 · title страниц</code></div>
+        <div class="line"><span style="font-size:18px;font-weight:600">Merge !4629?</span><code>18 · диалог</code></div>
+        <div class="line"><span style="font-size:16px;font-weight:600">Description</span><code>16 · секция</code></div>
+        <div class="line"><span>Body text</span><code>14 · всё остальное</code></div>
+        <div class="line"><span style="font-size:12px;color:var(--muted)">Caption · tag</span><code>12 · подписи</code></div>
+        <div class="line"><span class="mono">a1b2c3d</span><code>13 mono · sha, ветки</code></div>
+      </div>
+      <div class="card">
+        <h4>Поверхности и радиусы</h4>
+        <div class="line"><span>Page</span><div class="sw" style="background:var(--bg)"></div></div>
+        <div class="line"><span>Surface 1 · карточки</span><div class="sw" style="background:var(--s1)"></div></div>
+        <div class="line"><span>Surface 2 · active, counter</span><div class="sw" style="background:var(--s2)"></div></div>
+        <div class="line"><span>Hover</span><div class="sw" style="background:var(--hover)"></div></div>
+        <div class="line"><span>Border · одна линия</span><div class="sw" style="background:var(--line)"></div></div>
+        <div class="line"><span>4 · tag &nbsp; 6 · control &nbsp; 10 · card &nbsp; 12 · dialog</span><span class="row"><span class="sw" style="width:20px;border-radius:4px;background:var(--s2)"></span><span class="sw" style="width:20px;border-radius:6px;background:var(--s2)"></span><span class="sw" style="width:20px;border-radius:10px;background:var(--s2)"></span></span></div>
+      </div>
+      <div class="card">
+        <h4>Контролы · все 28px</h4>
+        <div class="line"><span class="row"><button class="btn btn-primary">Merge</button><button class="btn btn-secondary">Approve</button></span><code>primary · secondary</code></div>
+        <div class="line"><span class="row"><button class="btn btn-ghost">Open in GitLab ↗</button></span><code>ghost</code></div>
+        <div class="line"><span class="row"><button class="btn btn-danger">Delete</button></span><code>danger</code></div>
+        <div class="line"><span class="row"><span class="fpill on"><span class="fslot"><svg class="i ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke-dasharray="2.6 2.6"/></svg><button class="fx" aria-label="Remove filter" title="Remove filter"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></span><button class="lbl">Status: Open<svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></span><button class="fpill"><span class="lbl"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Label</span><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></span><code>filter</code></div>
+        <div class="line"><span class="row"><span class="tag t-red">Failed</span><span class="tag t-green">Approved</span><span class="tag t-gray">draft</span></span><code>tag 20px</code></div>
+        <div class="line"><span class="row"><span class="status"><i class="dot d-green"></i>Open</span><span class="counter">12</span><span class="counter bad">3</span></span><code>status · counter</code></div>
+      </div>
+      <div class="card" style="grid-column:span 3">
+        <h4>Навигация: ровно два вида табов</h4>
+        <div class="row" style="gap:40px;align-items:flex-start">
+          <div><div class="vtabs"><button class="vtab on">▦ Issues</button><button class="vtab">⑂ Merge requests</button><button class="vtab">▷ Pipelines</button></div><p style="font-size:12px;color:var(--muted);margin-top:8px">Pill · переключает раздел (уровень 1)</p></div>
+          <div style="flex:1"><div class="utabs"><button class="utab on">All</button><button class="utab">Assigned to me <span class="counter">4</span></button><button class="utab">Mine</button></div><p style="font-size:12px;color:var(--muted);margin-top:8px">Underline · виды внутри раздела и вкладки страницы (уровень 2). Тот же компонент для All/Mine, вкладок MR и быстрых фильтров веток.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1 LISTS -->
+  <section class="screen" id="lists">
+    <div class="shead"><h2>1 · Списки</h2><span>Issues, Merge requests, Pipelines, Branches — один каркас</span></div>
+    <div class="split">
+      <div class="frame">
+        <div class="topbar"><span class="crumb cur">GitLab</span><span class="grow"></span><span style="color:var(--muted);font-size:13px;margin-right:8px">synced 2m ago</span><button class="btn btn-ghost">↻ Sync</button></div>
+        <div class="page">
+          <h1 class="t-db">GitLab</h1>
+          <div class="row" style="padding-bottom:4px">
+            <div class="vtabs" id="dbtabs">
+              <button class="vtab on" data-v="issues">▦ Issues</button>
+              <button class="vtab" data-v="mrs">⑂ Merge requests</button>
+              <button class="vtab" data-v="pipes">▷ Pipelines</button>
+              <button class="vtab" data-v="branches">⊸ Branches</button>
+            </div>
+            <span class="grow"></span>
+            <label class="search">⌕ <input id="sph" placeholder="Search issues…"></label>
+            <button class="btn btn-primary" id="dbaction">New issue</button>
+          </div>
+          <div class="utabs" id="dbviews" style="margin-top:8px"></div>
+          <div class="row wrap" style="padding:10px 0" id="dbfilters"></div>
+          <div id="dbtable"></div>
+        </div>
+      </div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Правый край тулбара одинаковый:</b> поиск-поле + одна primary-кнопка. <span class="was">Было: у Issues иконки ⌕ и фильтр, у Pipelines поле и «Run pipeline», у Branches только поле.</span></li>
+        <li><b>Быстрые фильтры веток стали underline-табами</b>, как All / Mine. <span class="was">Было: отдельные бордерные чипы.</span></li>
+        <li><b>Все фильтры — FilterPill</b> под табами, «+ Filter» и «Reset» в одном ряду. Иконка, текст и стрелка — SVG по центру пилюли.</li>
+        <li><b>Наведи на активный фильтр:</b> иконка слева меняется на ×, клик убирает фильтр; стрелка справа остаётся и открывает меню. Клик по тексту открывает меню. <b>Reset красный</b> и виден только при активных фильтрах. Попробуй в макете.</li>
+        <li><b>Line-иконки вместо эмодзи</b> в навигации (🙋 ✍️ 👀 убраны из табов). Эмодзи остаются в контенте: реакции, callout.</li>
+        <li><b>Таблица:</b> строка 36px, одна линия границ, имя 500 weight, теги 20px с радиусом 4.</li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 2 MR -->
+  <section class="screen" id="mr">
+    <div class="shead"><h2>2 · Merge request</h2><span>шаблон любой страницы-объекта</span></div>
+    <div class="split">
+      <div class="frame">
+        <div class="topbar"><span class="crumb">GitLab</span><span class="sep">/</span><span class="crumb">Merge requests</span><span class="sep">/</span><span class="crumb cur">!4629</span><span class="grow"></span><button class="btn btn-ghost">⚡ Review with agent</button><button class="btn btn-ghost">Open in GitLab ↗</button><button class="btn btn-ghost btn-icon">⋯</button></div>
+        <div class="page doc">
+          <h1 class="t-doc">PP-3818361: Connect product tasks to the catalog</h1>
+          <div class="meta" style="padding-bottom:16px"><span class="status"><i class="dot d-green"></i>Open</span><span class="person"><span class="av" style="background:#4a7c59">AL</span>A.Leonov</span><span>wants to merge</span><span class="code">feature/tasks</span><span>into</span><span class="code">master</span><span>·</span><span>updated 3h ago</span></div>
+          <div class="cells">
+            <button class="cell"><small>Review</small><b><svg class="i ok" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>Approved</b></button>
+            <button class="cell"><small>Pipeline</small><b><svg class="i no" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></svg>Failed</b></button>
+            <button class="cell"><small>Threads</small><b><svg class="i wait" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>2 open</b></button>
+            <button class="cell"><small>Conflicts</small><b><svg class="i ok" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>None</b></button>
+            <button class="cell"><small>stage-1</small><b><svg class="i wait" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>Not picked</b></button>
+          </div>
+          <div class="row" style="padding:12px 0 16px">
+            <span style="color:var(--muted)"><b style="color:var(--fg);font-weight:500">Blocked:</b> pipeline failed · 2 open threads</span>
+            <span class="grow"></span>
+            <button class="btn btn-ghost">Retry failed jobs</button>
+            <button class="btn btn-secondary">👍 Approve</button>
+            <button class="btn btn-primary" disabled>Merge</button>
+          </div>
+          <div class="utabs"><button class="utab on">Overview</button><button class="utab">Discussion <span class="counter bad">2</span></button><button class="utab">Commits <span class="counter">4</span></button><button class="utab">Changes <span class="counter">12</span></button><button class="utab">Pipeline</button></div>
+          <div class="layout">
+            <div class="stack" style="gap:24px">
+              <div class="callout bad"><span class="ic no"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></svg></span><div style="flex:1;min-width:0"><b>test · pytest failed</b><div class="mono" style="color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">FAILED tests/test_tasks.py::test_concurrent_delete - AssertionError</div></div><button class="btn btn-secondary">Retry</button></div>
+              <div><h2 class="t-sec">Description</h2><p>Hooks read the task type from the row under <span class="code">select_for_update</span>, so deleting and changing status run one after another.</p>
+                <div class="rx"><span class="rxb mine">👍 2</span><span class="rxb">👎</span><span class="rxb">☺︎</span></div></div>
+              <div><h2 class="t-sec">Unresolved <span class="counter bad">2</span></h2>
+                <div class="card thread">
+                  <div class="thead"><span style="color:var(--muted)">▾</span><span class="place mono">src/tasks/hooks.py:88</span><span class="tag t-red">Unresolved</span><span class="sum">Between reading the type and clearing the field…</span><span class="av" style="background:#5b6abf">MK</span><span style="color:var(--muted)">2</span></div>
+                  <div class="cm"><span class="av lg" style="background:#5b6abf">MK</span><div class="body"><div class="who"><b>M.Kosach</b><span>3d ago</span></div><p>Between reading the task type and clearing the field another request can swap the task.</p><div class="rx"><span class="rxb">☺︎</span></div></div></div>
+                  <div class="cm"><span class="av lg" style="background:#4a7c59">AL</span><div class="body"><div class="who"><b>A.Leonov</b><span>2d ago</span></div><p>Fixed in <span class="code">4d89caa</span>: both hooks lock the row.</p><div class="rx"><span class="rxb">👍 1</span></div></div></div>
+                  <div class="tfoot"><span class="reply">Reply…</span><button class="btn btn-secondary"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Resolve</button></div>
+                </div>
+              </div>
+            </div>
+            <aside class="rail">
+              <div><h4>Reviewers</h4><div class="stack"><span class="person"><span class="av" style="background:#b0644a">AG</span>A.Goncharov <span class="tag t-green">Approved</span></span><span class="person"><span class="av" style="background:#7a5aa8">DK</span>D.Kozlovsky</span></div></div>
+              <div><h4>Assignee</h4><span class="person"><span class="av" style="background:#4a7c59">AL</span>A.Leonov</span></div>
+              <div><h4>Labels</h4><div class="row wrap"><span class="tag t-purple">backend</span><span class="tag t-yellow">needs-qa</span></div></div>
+              <div><h4>Agents</h4><span class="tag t-gray">⚡ Review !4629</span></div>
+            </aside>
+          </div>
+        </div>
+      </div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Ширина 960 у всех страниц-объектов</b> (MR, Issue, Pipeline). <span class="was">Было: MR 960, Issue и Pipeline 708, New issue 708.</span></li>
+        <li><b>Заголовок 32px</b> на всех страницах-объектах, 40 — только у «GitLab». <span class="was">Было: MR 32, Issue и Pipeline 40.</span></li>
+        <li><b>Карточки статуса = обычная card</b> с иконкой в круге (check, x, clock) вместо символов ✓ ✕ ●, без цветной рамки. Все карточки, callout и треды — радиус 10 и одна граница.</li>
+        <li><b>Счётчики в табах — один Counter</b> (12px, pill). <span class="was">Было: 11.5px, свой красный, «● N new» и home-счётчик разного вида.</span></li>
+        <li><b>Top bar только ghost-кнопки</b>, primary-действия живут в строке действий. <span class="was">Было: «Run again» синим в top bar у Pipeline.</span></li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 3 ISSUE -->
+  <section class="screen" id="issue">
+    <div class="shead"><h2>3 · Issue</h2><span>тот же шаблон, свойства вместо карточек статуса</span></div>
+    <div class="split">
+      <div class="frame">
+        <div class="topbar"><span class="crumb">GitLab</span><span class="sep">/</span><span class="crumb">Issues</span><span class="sep">/</span><span class="crumb cur">#38</span><span class="grow"></span><button class="btn btn-ghost">⚡ Send agent</button><button class="btn btn-ghost">Open in GitLab ↗</button><button class="btn btn-ghost btn-icon">⋯</button></div>
+        <div class="page doc">
+          <h1 class="t-doc">Allow work in task worktrees from the panel</h1>
+          <div class="meta" style="padding-bottom:12px"><span class="person"><span class="av" style="background:#8a7a2a">DS</span>D.Seregin</span><span>opened 5d ago</span><span>·</span><span>updated 1h ago</span></div>
+          <div class="props" style="border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:24px">
+            <div class="prop"><span class="k">◌ Status</span><span class="v"><span class="status"><i class="dot d-green"></i>Open</span></span></div>
+            <div class="prop"><span class="k">☺ Assignee</span><span class="v"><span class="person"><span class="av" style="background:#5b6abf">MK</span>M.Kosach</span></span></div>
+            <div class="prop"><span class="k">≡ Labels</span><span class="v"><span class="tag t-red">bug</span><span class="tag t-blue">agent</span></span></div>
+            <div class="prop"><span class="k">▢ Project</span><span class="v">partners/backend</span></div>
+            <div class="prop"><span class="k">⚡ Agents</span><span class="v"><span class="tag t-gray">⚡ Investigate #38</span></span></div>
+          </div>
+          <h2 class="t-sec">Description</h2>
+          <p style="margin-bottom:24px">The worktree created by the agent is not visible in the panel. Show it in the branch list and allow opening it.</p>
+          <h2 class="t-sec">Comments <span class="counter">1</span></h2>
+          <div class="card thread"><div class="cm"><span class="av lg" style="background:#5b6abf">MK</span><div class="body"><div class="who"><b>M.Kosach</b><span>1h ago</span></div><p>Taking it, will check after the release.</p></div></div><div class="tfoot"><span class="reply">Add a comment…</span></div></div>
+        </div>
+      </div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Мета-строка как у MR:</b> автор, когда открыт, когда обновлён. Author и Updated ушли из свойств.</li>
+        <li><b>Свойства обрамлены линиями</b> сверху и снизу, ширина колонки подписи 160.</li>
+        <li><b>Комментарии в той же карточке</b>, что треды MR: те же отступы 16/48, то же поле ответа.</li>
+        <li><b>Секции 16px semibold</b> везде. <span class="was">Было: Description 16, Jobs 18, группы Home 14.</span></li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 4 PIPELINE -->
+  <section class="screen" id="pipeline">
+    <div class="shead"><h2>4 · Pipeline</h2></div>
+    <div class="split">
+      <div class="frame">
+        <div class="topbar"><span class="crumb">GitLab</span><span class="sep">/</span><span class="crumb">Pipelines</span><span class="sep">/</span><span class="crumb cur">#88412</span><span class="grow"></span><button class="btn btn-ghost">Open in GitLab ↗</button><button class="btn btn-ghost btn-icon">⋯</button></div>
+        <div class="page doc">
+          <h1 class="t-doc">Pipeline #88412</h1>
+          <div class="meta" style="padding-bottom:16px"><span class="status"><i class="dot d-red"></i>Failed</span><span class="code">feature/tasks</span><span class="mono">a1b2c3d</span><span>·</span><span>by A.Leonov</span><span>·</span><span>12m 40s</span><span>·</span><span>40m ago</span></div>
+          <div class="row" style="padding-bottom:16px"><span style="color:var(--muted)">14 of 16 jobs passed</span><span class="grow"></span><button class="btn btn-secondary">Retry failed</button><button class="btn btn-primary">Run again</button></div>
+          <div class="utabs"><button class="utab on">Jobs <span class="counter">16</span></button><button class="utab">Failed <span class="counter bad">2</span></button></div>
+          <table class="db" style="margin-top:8px">
+            <tr><th style="width:110px">Stage</th><th>Job</th><th style="width:120px">Status</th><th style="width:90px">Duration</th><th style="width:90px"></th></tr>
+            <tr><td>test</td><td class="name">pytest</td><td><span class="tag t-red">Failed</span></td><td>4m 12s</td><td><button class="btn btn-ghost" style="height:24px">Retry</button></td></tr>
+            <tr><td>test</td><td class="name">lint</td><td><span class="status"><i class="dot d-green"></i>Passed</span></td><td>48s</td><td></td></tr>
+            <tr><td>build</td><td class="name">docker</td><td><span class="status"><i class="dot d-green"></i>Passed</span></td><td>3m 02s</td><td></td></tr>
+            <tr><td>deploy</td><td class="name">stage-1</td><td><span class="status"><i class="dot d-gray"></i>Manual</span></td><td>—</td><td><button class="btn btn-ghost" style="height:24px">▷ Run</button></td></tr>
+          </table>
+        </div>
+      </div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>7 свойств стали одной мета-строкой</b>, как у MR. Страница начинается с работы, а не со списка полей.</li>
+        <li><b>«Run again» из top bar в строку действий</b> рядом с «Retry failed».</li>
+        <li><b>Статус: спокойное состояние — точка, проблема — цветной tag.</b> Одно правило для джобов, пайплайнов, MR и списков.</li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 5 HOME -->
+  <section class="screen" id="home">
+    <div class="shead"><h2>5 · Home</h2><span>секция на главной BB</span></div>
+    <div class="split">
+      <div class="frame"><div class="page"><div class="home">
+        <div class="row" style="margin-bottom:12px"><h2 class="t-sec" style="margin:0">GitLab</h2><span class="grow"></span><div class="seg"><button>Week</button><button class="on">Month</button><button>Year</button></div></div>
+        <div class="counters">
+          <button class="cell"><small>Needs my review</small><b>3</b></button>
+          <button class="cell"><small>My MRs blocked</small><b>2</b></button>
+          <button class="cell"><small>Ready to merge</small><b>1</b></button>
+          <button class="cell"><small>Commits this month</small><b>84</b></button>
+        </div>
+        <div class="card" style="padding:12px 16px;margin-bottom:16px"><div class="heat" id="heat"></div><div class="row" style="justify-content:space-between;margin-top:8px;font-size:12px;color:var(--muted)"><span>84 commits · +3 120 / −1 404 lines</span><span>Hover a day</span></div></div>
+        <div class="hgroup">▾ Needs my review <span class="counter">3</span></div>
+        <div class="hrow"><span class="id mono">!4636</span><span class="tt">Catalog: weight product dialog</span><span class="tag t-blue">Review requested</span><span class="av" style="background:#4a7c59">AK</span><span class="tm">2h</span></div>
+        <div class="hrow"><span class="id mono">!4629</span><span class="tt">Connect product tasks to the catalog</span><span class="tag t-yellow">Re-review</span><span class="av" style="background:#4a7c59">AL</span><span class="tm">3h</span></div>
+        <div class="hgroup" style="margin-top:4px">▾ My merge requests <span class="counter">2</span></div>
+        <div class="hrow"><span class="id mono">!4601</span><span class="tt">Codex in registered worktrees</span><span class="tag t-red">Pipeline failed</span><span class="tm">1d</span></div>
+      </div></div></div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Счётчики = card</b> с подписью 12 и числом 24. <span class="was">Было: свой стиль с 12.5px.</span></li>
+        <li><b>Week / Month / Year — segmented control</b>, тот же, что в диалогах выбора.</li>
+        <li><b>Reason-теги = общий Tag</b> (12px, радиус 4). <span class="was">Было: 12.5px и радиус 3.</span></li>
+        <li><b>Заголовок «GitLab» без 🦊 и подложки</b>, как просил раньше.</li>
+        <li><b>Подсказка при наведении на день:</b> дата, коммиты, строки +/−, проекты дня. Тёмная плашка, как у GitHub. <span class="was">Было: системный title «2026-10-14: 35 commits» с задержкой.</span></li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 6 DIALOG -->
+  <section class="screen" id="dialog">
+    <div class="shead"><h2>6 · Диалог</h2><span>вариант B, уже утверждён — эталон для всех диалогов</span></div>
+    <div class="split">
+      <div class="frame"><div class="overlay"><div class="dialog">
+        <div class="dhead"><div class="dicon">⑂</div><div><h3>Merge !4629?</h3><p>feature/tasks → master</p></div></div>
+        <div class="dbody">
+          <div class="callout warn"><span class="ic">⚠️</span><div><b>Pipeline failed</b><div style="color:var(--muted)">Merging will skip the failed test job.</div></div></div>
+          <label class="row" style="gap:8px"><input type="checkbox" checked> Delete source branch</label>
+          <label class="row" style="gap:8px"><input type="checkbox"> Squash commits</label>
+        </div>
+        <div class="dfoot"><button class="btn btn-secondary">Cancel</button><button class="btn btn-primary">Merge anyway</button></div>
+      </div></div></div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Cancel — secondary, не ghost.</b> Пара кнопок в футере всегда secondary + primary (или danger).</li>
+        <li><b>Run pipeline, Cherry-pick, Merge</b> собраны из одних DIALOG_*-констант. <span class="was">Было: Run pipeline ещё на старом shadcn-шаблоне.</span></li>
+        <li><b>Callout в диалоге</b> = тот же callout, что на страницах.</li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 7 STATES -->
+  <section class="screen" id="states">
+    <div class="shead"><h2>7 · Ошибки, офлайн, пусто</h2></div>
+    <div class="split">
+      <div class="frame"><div class="page">
+        <div class="callout warn" style="margin-bottom:16px"><span class="ic">⚠️</span><div style="flex:1"><b>Can't reach scm.example.com</b><div style="color:var(--muted)">Check VPN. Showing the list loaded 49m ago.</div><details style="margin-top:6px;color:var(--muted);font-size:12px"><summary style="cursor:pointer">Details</summary><div class="mono" style="margin-top:4px">glab api failed: dial tcp: lookup host: no such host</div></details></div><button class="btn btn-secondary">Retry</button></div>
+        <div class="empty"><span style="font-size:32px">🌿</span><div><b style="font-weight:600">No branches match</b><div style="color:var(--muted)">Nothing is stale for more than 30 days.</div></div><button class="btn btn-secondary">Clear filters</button></div>
+      </div></div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Сырая ошибка glab уходит в Details.</b> Сверху — человеческая причина и «Retry». <span class="was">Было: полный URL API на всю ширину, на MR-странице — вместо всей страницы.</span></li>
+        <li><b>Офлайн показывает кэш</b>, если он есть: Pipelines, Branches и MR сейчас пустые, хотя Issues из кэша открываются.</li>
+        <li><b>Пустое состояние</b> одного вида: иконка, причина, одно действие.</li>
+      </ol></aside>
+    </div>
+  </section>
+
+  <!-- 8 CHAT -->
+  <section class="screen" id="chat">
+    <div class="shead"><h2>8 · Строка над чатом</h2><span>context segment треда: что дальше с веткой</span></div>
+    <div class="split">
+      <div class="frame"><div class="chatwrap">
+        <div class="states"><div class="lbl">Checking</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="status hint"><span class="spin"></span>Checking branch…</span><span class="grow"></span></div><div class="lbl">Есть изменения</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="status hint"><i class="dot d-yellow"></i>3 files changed</span><span class="grow"></span><button class="btn btn-primary">Commit</button></div><div class="lbl">Коммиты не запушены</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="status hint"><i class="dot d-yellow"></i>2 commits ahead of origin</span><span class="grow"></span><button class="btn btn-primary">Push…</button></div><div class="lbl">Ветка запушена, MR нет</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="status hint"><i class="dot d-blue"></i>Pushed · no merge request</span><span class="grow"></span><button class="btn btn-primary">Create MR</button></div><div class="lbl">MR открыт</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="tag t-gray">!4629</span><span class="status hint"><i class="dot d-red"></i>Pipeline failed · 2 open threads</span><span class="grow"></span><button class="btn btn-secondary">Open MR</button></div><div class="lbl">Всё сделано</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="tag t-gray">!4629</span><span class="status hint"><i class="dot d-green"></i>Up to date · approved</span><span class="grow"></span><button class="btn btn-ghost">Open MR</button></div><div class="lbl">Нет связи</div><div class="strip"><span class="brand"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>GitLab</span><span class="code br">feature/tasks</span><span class="status hint"><i class="dot d-red"></i>Can&#39;t reach GitLab · check VPN</span><span class="grow"></span><button class="btn btn-secondary">Retry</button></div></div>
+        <div class="composer" style="margin-top:8px"><span>Ask for a follow-up. @ to mention files, folders, sections, or threads</span><div class="bot"><span>＋</span><span>⚡ Model</span><span class="grow"></span><span>🎙</span></div></div>
+      </div></div>
+      <aside class="notes"><h3>Что поменялось</h3><ol>
+        <li><b>Строка = card</b>: радиус 10, Surface 1, одна граница, высота 44. <span class="was">Было: своя рамка и высота, не похоже на остальной плагин.</span></li>
+        <li><b>Line-иконка ветки вместо 🦊</b>, рядом имя ветки моно-шрифтом. Видно, про какую ветку речь.</li>
+        <li><b>Состояние = точка + короткая причина</b> вместо серого tag «Checking…». Цвет точки по тому же правилу, что в списках.</li>
+        <li><b>Одна кнопка справа, 28px.</b> Primary, когда ждём действия (Commit, Push, Create MR). Secondary для перехода в MR, ghost, когда всё сделано.</li>
+        <li><b>Номер MR — серый tag</b>, как в Branches. <span class="was">Было: синий «MR !4629» и зелёный «Done».</span></li>
+      </ol></aside>
+    </div>
+  </section>
+</div>
+
+<div class="tip hidden" id="tip"></div>
+<script>
+document.querySelectorAll('.toggle button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.toggle button').forEach(x=>x.classList.toggle('on',x===b));document.documentElement.classList.toggle('dark',b.dataset.theme==='dark')});
+const AV={DS:'#8a7a2a',NS:'#7a4a8a',MK:'#5b6abf',AV:'#8a5a2a',AL:'#4a7c59',AG:'#b0644a',DK:'#7a5aa8',EA:'#3a6a8a'};
+const av=i=>`<span class="person"><span class="av" style="background:${AV[i]}">${i}</span>${({DS:'D.Seregin',NS:'S.Novikov',MK:'M.Kosach',AV:'A.Vepryntsev',AL:'A.Leonov',AG:'A.Goncharov',DK:'D.Kozlovsky',EA:'E.Avetyan'})[i]}</span>`;
+const open='<span class="status"><i class="dot d-green"></i>Open</span>';
+const V={
+ issues:{ph:'Search issues…',act:'New issue',views:['All','Assigned to me|3','Mine'],filters:'<span class="fpill on"><span class="fslot"><svg class="i ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke-dasharray="2.6 2.6"/></svg><button class="fx" aria-label="Remove filter" title="Remove filter"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></span><button class="lbl">Status: Open<svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></span><button class="btn btn-ghost"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Filter</button><button class="btn btn-reset">Reset</button>',
+  head:['Name','Author','Status','Assignee','Labels'],w:[null,170,110,170,150],
+  rows:[['Allow work in task worktrees <span class="tag t-blue">⚡ agent</span>',av('DS'),open,av('MK'),'<span class="tag t-red">bug</span>'],['Reduce generated tests in agent runs',av('NS'),open,av('MK'),'<span class="tag t-yellow">debt</span>'],['Review bb setup for the team',av('MK'),open,av('MK'),''],['tech debt: readable error back',av('DS'),open,'','<span class="tag t-purple">debt</span>']],foot:'+ New issue'},
+ mrs:{ph:'Search merge requests…',act:null,views:['All','Review requests|3','Mine'],filters:'<span class="fpill on"><span class="fslot"><svg class="i ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke-dasharray="2.6 2.6"/></svg><button class="fx" aria-label="Remove filter" title="Remove filter"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></span><button class="lbl">Status: Open<svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></span><button class="btn btn-ghost"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Filter</button><button class="btn btn-reset">Reset</button>',
+  head:['Name','Author','Status','Reviewer','Pipeline'],w:[null,170,110,170,120],
+  rows:[['!4629 Connect product tasks to the catalog',av('AL'),open,av('DK'),'<span class="tag t-red">Failed</span>'],['!4636 Weight product dialog',av('AG'),open,av('MK'),'<span class="status"><i class="dot d-green"></i>Passed</span>'],['!4601 Codex in registered worktrees <span class="tag t-gray">draft</span>',av('MK'),open,'','<span class="status"><i class="dot d-yellow"></i>Running</span>'],['!4598 End date on the documents tab',av('EA'),open,av('AG'),'<span class="status"><i class="dot d-green"></i>Passed</span>']]},
+ pipes:{ph:'Search ref or commit…',act:'Run pipeline',views:['All','Mine','Failed|2'],filters:'<button class="fpill"><span class="lbl"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke-dasharray="2.6 2.6"/></svg>Status</span><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><button class="fpill"><span class="lbl"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-9 6"/></svg>Ref</span><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><button class="btn btn-ghost"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Filter</button>',
+  head:['Pipeline','Status','Ref','Source','Commit','Updated'],w:[110,120,null,110,100,100],
+  rows:[['#88412','<span class="tag t-red">Failed</span>','<span class="mono">feature/tasks</span>','push','<span class="mono">a1b2c3d</span>','40m ago'],['#88407','<span class="status"><i class="dot d-yellow"></i>Running</span>','<span class="mono">master</span>','merge','<span class="mono">9f8e7d6</span>','1h ago'],['#88390','<span class="status"><i class="dot d-green"></i>Passed</span>','<span class="mono">stage-1</span>','web','<span class="mono">5c4b3a2</span>','3h ago']]},
+ branches:{ph:'Search branches…',act:null,views:['All','With open MR|6','No MR','Stale > 30d|9','Merged'],filters:'',
+  head:['Branch','Last commit','Author','Merge request'],w:[260,null,170,140],
+  rows:[['<span class="mono">feature/tasks</span>','Lock the row in both hooks',av('AL'),'<span class="tag t-gray">!4629</span>'],['<span class="mono">fix/weight-dialog</span>','Round grams on save',av('AG'),'<span class="tag t-gray">!4636</span>'],['<span class="mono">spike/hive-cache</span> <span class="tag t-yellow">stale 41d</span>','WIP cache',av('EA'),'<button class="btn btn-ghost" style="height:24px">+ Create MR</button>']]}
+};
+function render(k){const v=V[k];
+ document.querySelectorAll('#dbtabs .vtab').forEach(b=>b.classList.toggle('on',b.dataset.v===k));
+ document.getElementById('sph').placeholder=v.ph;
+ const a=document.getElementById('dbaction');a.textContent=v.act||'';a.classList.toggle('hidden',!v.act);
+ document.getElementById('dbviews').innerHTML=v.views.map((x,i)=>{const[t,c]=x.split('|');return `<button class="utab${i?'':' on'}">${t}${c?` <span class="counter">${c}</span>`:''}</button>`}).join('');
+ const f=document.getElementById('dbfilters');f.innerHTML=v.filters;f.style.display=v.filters?'flex':'none';
+ document.getElementById('dbtable').innerHTML=`<table class="db" style="${v.filters?'':'margin-top:10px'}"><colgroup>${v.w.map(w=>`<col${w?` style="width:${w}px"`:''}>`).join('')}</colgroup><tr>${v.head.map(h=>`<th><span>${h}</span></th>`).join('')}</tr>${v.rows.map(r=>`<tr>${r.map((c,i)=>`<td${i?'':' class="name"'}>${c}</td>`).join('')}</tr>`).join('')}</table>${v.foot?`<div class="foot">${v.foot}</div>`:''}`;
+}
+document.querySelectorAll('#dbtabs .vtab').forEach(b=>b.onclick=()=>render(b.dataset.v));
+document.getElementById('dbfilters').addEventListener('click',e=>{const x=e.target.closest('.fx,.btn-reset');if(!x)return;const f=e.currentTarget;
+ if(x.classList.contains('fx'))x.closest('.fpill').remove();else f.querySelectorAll('.fpill.on').forEach(p=>p.remove());
+ if(!f.querySelector('.fpill.on'))f.querySelector('.btn-reset')?.remove()});render('issues');
+const h=document.getElementById('heat');const tip=document.getElementById('tip');
+const lv=['var(--s2)','color-mix(in srgb,var(--green) 30%,transparent)','color-mix(in srgb,var(--green) 55%,transparent)','color-mix(in srgb,var(--green) 80%,transparent)','var(--green)'];
+const PR=['partners-backend','bb-plugin-gitlab','masterdata'];
+const end=new Date(2026,10,2);const N=26*7;const nf=n=>n.toLocaleString('en-US').replace(/,/g,' ');
+for(let i=0;i<N;i++){const d=new Date(end);d.setDate(end.getDate()-(N-1-i));
+ const r=Math.abs((Math.sin(i*12.9898)*43758.5453)%1);const we=d.getDay()===0||d.getDay()===6;
+ const c=(we&&r<.8)||r<.3?0:Math.round(r*r*38);const e=document.createElement('i');
+ e.style.background=lv[c===0?0:c<5?1:c<12?2:c<22?3:4];
+ const add=c*(37+Math.round(r*60)),del=Math.round(add*(.2+r*.3));const a=Math.ceil(c*.6),b=c-a;
+ e.onmouseenter=()=>{const ds=d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+  tip.innerHTML=c===0?`<b>No commits</b><span class="d">${ds}</span>`:
+  `<b>${c} commit${c>1?'s':''}</b><span class="d">${ds}</span><div class="ln"><span class="add">+${nf(add)}</span><span class="del">−${nf(del)}</span><span class="d">lines</span></div><div class="pr"><span><span>${PR[i%3]}</span><span class="d">${a}</span></span>${b?`<span><span>${PR[(i+1)%3]}</span><span class="d">${b}</span></span>`:''}</div>`;
+  const R=e.getBoundingClientRect();tip.style.left=(R.left+R.width/2)+'px';tip.style.top=R.top+'px';tip.classList.remove('hidden')};
+ e.onmouseleave=()=>tip.classList.add('hidden');h.appendChild(e)}
+</script>
+</body>
+</html>

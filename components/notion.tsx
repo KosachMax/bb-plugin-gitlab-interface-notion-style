@@ -94,7 +94,7 @@ export function Tag({
     <span
       title={title}
       className={cn(
-        "inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-1.5 text-sm leading-5",
+        "inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-1.5 text-xs leading-5",
         TAG_CLASSES[color],
         className,
       )}
@@ -188,16 +188,42 @@ export const ICONS = {
   commit: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 12h6M15 12h6",
   comment: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
+  tick: "M20 6 9 17l-5-5",
+  circleCheck: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8.5 12l2.5 2.5 4.5-5",
+  circleX: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM15 9l-6 6M9 9l6 6",
+  circleClock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7.5V12l3 2",
+  circleDot: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 12h.01",
+  userCheck: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM16 11l2 2 4-4",
+  pen: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z",
+  eye: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  refresh: "M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M3 21v-5h5",
 } as const;
+
+export type StatusTone = "ok" | "bad" | "wait" | "neutral";
+
+const STATUS_ICON: Record<StatusTone, { path: string; className: string }> = {
+  ok: { path: ICONS.circleCheck, className: "text-emerald-600 [.dark_&]:text-emerald-400" },
+  bad: { path: ICONS.circleX, className: "text-red-600 [.dark_&]:text-red-400" },
+  wait: { path: ICONS.circleClock, className: "text-amber-600 [.dark_&]:text-amber-400" },
+  neutral: { path: ICONS.circleDot, className: "text-muted-foreground" },
+};
+
+/** A state as a line icon in a circle: check, x, clock or dot. Never a text glyph. */
+export function StatusIcon({ tone, size = 16, className }: { tone: StatusTone; size?: number; className?: string }) {
+  const entry = STATUS_ICON[tone];
+  return <Icon path={entry.path} size={size} className={cn(entry.className, className)} />;
+}
 
 export function Icon({
   path,
   className,
   size = 16,
+  strokeWidth = 1.75,
 }: {
   path: string;
   className?: string;
   size?: number;
+  strokeWidth?: number;
 }) {
   return (
     <svg
@@ -206,7 +232,7 @@ export function Icon({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.75"
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
       className={cn("shrink-0", className)}
@@ -336,28 +362,54 @@ export function ToggleSection({
   );
 }
 
-/** A callout block: tinted box, leading emoji, text. */
+/** The one card surface: 10px radius, a faint tint and a single inset rule. */
+export const CARD = "rounded-[10px] bg-foreground/[0.045] shadow-[inset_0_0_0_1px_var(--border)]";
+
+const CALLOUT_TONE = {
+  neutral: CARD,
+  bad: "rounded-[10px] bg-red-500/[0.12]",
+  warn: "rounded-[10px] bg-amber-500/[0.15]",
+  info: "rounded-[10px] bg-[rgba(35,131,226,0.12)]",
+} as const;
+
+/**
+ * A callout block: tinted card, leading emoji, text. `details` folds raw
+ * output (an API error, a log tail) behind a "Details" toggle; `action` sits
+ * on the right.
+ */
 export function Callout({
   icon,
   children,
   className,
+  tone = "neutral",
+  details,
+  action,
 }: {
   icon: string;
   children: React.ReactNode;
   className?: string;
+  tone?: keyof typeof CALLOUT_TONE;
+  details?: string;
+  action?: React.ReactNode;
 }) {
   return (
     <div
       role="status"
-      className={cn(
-        "flex items-start gap-2.5 rounded-md bg-foreground/[0.04] px-4 py-4 text-sm",
-        className,
-      )}
+      className={cn("flex items-start gap-2.5 px-4 py-3 text-sm", CALLOUT_TONE[tone], className)}
     >
-      <span className="text-xl leading-6" aria-hidden="true">
+      <span className="text-base leading-6" aria-hidden="true">
         {icon}
       </span>
-      <div className="min-w-0 flex-1 leading-6">{children}</div>
+      <div className="min-w-0 flex-1 leading-6">
+        {children}
+        {details !== undefined && details.length > 0 ? (
+          <details className="mt-1 text-xs text-muted-foreground">
+            <summary className="cursor-pointer select-none hover:text-foreground">Details</summary>
+            <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">{details}</pre>
+          </details>
+        ) : null}
+      </div>
+      {action !== undefined ? <div className="flex shrink-0 items-center">{action}</div> : null}
     </div>
   );
 }
@@ -396,6 +448,42 @@ export const GhostButton = React.forwardRef<
 ));
 GhostButton.displayName = "GhostButton";
 
+/** A quiet bordered button on the page background: Approve, Cancel, Retry. */
+export const SecondaryButton = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement>
+>(({ className, type = "button", ...props }, ref) => (
+  <button
+    ref={ref}
+    type={type}
+    className={cn(
+      "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-background px-2.5 text-sm text-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors hover:bg-state-hover disabled:pointer-events-none disabled:opacity-50 data-[state=open]:bg-state-hover",
+      className,
+    )}
+    {...props}
+  />
+));
+SecondaryButton.displayName = "SecondaryButton";
+
+/** "Reset" for a filter row: red text, shown only while a filter is on. */
+export const ResetButton = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement>
+>(({ className, type = "button", children = "Reset", ...props }, ref) => (
+  <button
+    ref={ref}
+    type={type}
+    className={cn(
+      "inline-flex h-7 shrink-0 items-center rounded-md px-2 text-sm text-red-600 transition-colors hover:bg-red-500/10 [.dark_&]:text-red-400",
+      className,
+    )}
+    {...props}
+  >
+    {children}
+  </button>
+));
+ResetButton.displayName = "ResetButton";
+
 /** Notion's blue primary button ("New", "Create"). */
 export const PrimaryButton = React.forwardRef<
   HTMLButtonElement,
@@ -405,7 +493,7 @@ export const PrimaryButton = React.forwardRef<
     ref={ref}
     type={type}
     className={cn(
-      "inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-blue-600 px-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:pointer-events-none disabled:opacity-40",
+      "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-blue-600 px-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:pointer-events-none disabled:opacity-40",
       className,
     )}
     {...props}
@@ -444,28 +532,207 @@ export function ViewTab({
   );
 }
 
-/** A filter pill: blue-tinted once it narrows anything. */
+/**
+ * A filter pill: blue-tinted once it narrows anything. The pill itself is the
+ * menu trigger (refs and Radix props land on the label button); an active
+ * pill with `onRemove` swaps its leading icon for an × on hover or focus, a
+ * sibling button, so the trigger never nests a button.
+ */
 export const FilterPill = React.forwardRef<
   HTMLButtonElement,
-  React.ButtonHTMLAttributes<HTMLButtonElement> & { active: boolean }
->(({ className, active, type = "button", children, ...props }, ref) => (
-  <button
-    ref={ref}
-    type={type}
-    className={cn(
-      "inline-flex h-7 max-w-[260px] shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2.5 text-sm transition-colors",
-      active
-        ? "border-blue-600/35 bg-blue-600/[0.06] text-blue-700 hover:bg-blue-600/[0.12] [.dark_&]:border-blue-400/40 [.dark_&]:bg-blue-400/10 [.dark_&]:text-blue-300"
-        : "border-border text-muted-foreground hover:bg-state-hover hover:text-foreground",
-      className,
-    )}
-    {...props}
-  >
-    {children}
-    <Icon path={ICONS.chevronDown} size={12} className="opacity-60" />
-  </button>
-));
+  React.ButtonHTMLAttributes<HTMLButtonElement> & {
+    active: boolean;
+    icon?: string;
+    onRemove?: () => void;
+    removeLabel?: string;
+  }
+>(({ className, active, icon, onRemove, removeLabel = "Remove filter", type = "button", children, ...props }, ref) => {
+  const removable = active && onRemove !== undefined;
+  return (
+    <span
+      className={cn(
+        "group/pill inline-flex h-7 max-w-[280px] shrink-0 items-center rounded-full text-sm leading-none transition-colors",
+        active
+          ? "bg-blue-600/[0.07] text-blue-700 shadow-[inset_0_0_0_1px_rgba(37,99,235,0.35)] [.dark_&]:bg-blue-400/10 [.dark_&]:text-blue-300 [.dark_&]:shadow-[inset_0_0_0_1px_rgba(96,165,250,0.4)]"
+          : "text-muted-foreground shadow-[inset_0_0_0_1px_var(--border)] hover:bg-state-hover hover:text-foreground",
+        className,
+      )}
+    >
+      {icon !== undefined ? (
+        <span className="relative ml-2 grid size-4 shrink-0 place-items-center">
+          <Icon
+            path={icon}
+            size={14}
+            className={cn(removable && "transition-opacity group-hover/pill:opacity-0 group-focus-within/pill:opacity-0")}
+          />
+          {removable ? (
+            <button
+              type="button"
+              aria-label={removeLabel}
+              title={removeLabel}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemove();
+              }}
+              className="absolute -inset-0.5 grid place-items-center rounded-full opacity-0 transition-opacity hover:bg-current/15 focus-visible:opacity-100 group-hover/pill:opacity-100 group-focus-within/pill:opacity-100"
+            >
+              <Icon path={ICONS.close} size={12} strokeWidth={2.4} />
+            </button>
+          ) : null}
+        </span>
+      ) : null}
+      <button
+        ref={ref}
+        type={type}
+        className={cn(
+          "inline-flex h-full min-w-0 items-center gap-1 rounded-full pr-2.5 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50",
+          icon !== undefined ? "pl-1.5" : "pl-2.5",
+        )}
+        {...props}
+      >
+        <span className="min-w-0 truncate">{children}</span>
+        <Icon path={ICONS.chevronDown} size={13} className="opacity-60" />
+      </button>
+    </span>
+  );
+});
 FilterPill.displayName = "FilterPill";
+
+/** A small count: tab badges, group sizes, unresolved threads. */
+export function Counter({
+  tone = "neutral",
+  className,
+  children,
+}: {
+  tone?: "neutral" | "bad" | "info";
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-medium leading-none tabular-nums",
+        tone === "bad"
+          ? "bg-red-500/15 text-red-700 [.dark_&]:text-red-300"
+          : tone === "info"
+            ? "bg-blue-600/15 text-blue-700 [.dark_&]:text-blue-300"
+            : "bg-foreground/[0.07] text-muted-foreground",
+        className,
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** The level-two tab row: views inside a section, tabs on a page. */
+export function UnderlineTabs({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <div role="tablist" aria-label={label} className={cn("flex items-center gap-0.5 overflow-x-auto shadow-[inset_0_-1px_0_var(--border)]", className)}>
+      {children}
+    </div>
+  );
+}
+
+export function UnderlineTab({
+  active,
+  onClick,
+  icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={cn(
+        "relative inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 text-sm transition-colors after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full",
+        active
+          ? "font-semibold text-foreground after:bg-foreground"
+          : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {icon !== undefined ? <Icon path={icon} size={15} /> : null}
+      {children}
+    </button>
+  );
+}
+
+/** A segmented switch (Week / Month / Year). */
+export function SegmentedControl<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: readonly { value: T; label: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div role="tablist" aria-label={label} className="inline-flex rounded-lg bg-foreground/[0.07] p-0.5">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          role="tab"
+          aria-selected={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={cn(
+            "h-6 rounded-md px-2.5 text-[13px] transition-colors",
+            value === option.value
+              ? "bg-background text-foreground shadow-[0_0_0_1px_var(--border)]"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A toolbar search field: always visible, so every list has the same right edge. */
+export function SearchField({
+  value,
+  onChange,
+  placeholder,
+  label,
+  inputRef,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  label: string;
+  inputRef?: React.Ref<HTMLInputElement>;
+}) {
+  return (
+    <label className="flex h-7 w-52 items-center gap-1.5 rounded-md px-2 text-muted-foreground transition-colors focus-within:bg-state-hover hover:bg-state-hover">
+      <Icon path={ICONS.search} size={15} />
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        aria-label={label}
+        spellCheck={false}
+        className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+      />
+      {value.length > 0 ? (
+        <button type="button" aria-label="Clear search" onClick={() => onChange("")} className="grid size-4 place-items-center rounded-full hover:bg-foreground/10">
+          <Icon path={ICONS.close} size={11} strokeWidth={2.2} />
+        </button>
+      ) : null}
+    </label>
+  );
+}
 
 /** One tinted background per person, so neighbors in a list are easy to tell apart. */
 const AVATAR_CLASSES = [
@@ -558,7 +825,7 @@ export const DIALOG_SHELL =
   "max-w-md gap-0 overflow-hidden rounded-xl border-0 p-0 shadow-[rgba(15,15,15,0.05)_0_0_0_1px,rgba(15,15,15,0.1)_0_5px_10px,rgba(15,15,15,0.2)_0_15px_40px] [.dark_&]:shadow-[rgba(255,255,255,0.094)_0_0_0_1px,rgba(0,0,0,0.3)_0_5px_10px,rgba(0,0,0,0.4)_0_15px_40px]";
 export const DIALOG_HEAD = "flex-row items-start gap-3.5 space-y-0 px-6 pt-6 text-left";
 export const DIALOG_ICON =
-  "grid size-10 shrink-0 place-items-center rounded-lg bg-foreground/[0.05] text-xl leading-none";
+  "grid size-10 shrink-0 place-items-center rounded-lg bg-foreground/[0.07] text-xl leading-none";
 export const DIALOG_TITLE = "text-[18px] font-semibold leading-snug tracking-normal text-foreground";
 export const DIALOG_LEAD = "mt-1 text-sm leading-relaxed text-muted-foreground";
 export const DIALOG_BODY = "flex flex-col gap-2.5 px-6 pt-5";
