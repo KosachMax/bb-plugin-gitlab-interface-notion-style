@@ -2371,6 +2371,7 @@ export default async function plugin(bb: BbPluginApi) {
       const commitRow = z.looseObject({
         id: z.string(),
         authored_date: z.string().catch(""),
+        committed_date: z.string().catch(""),
         parent_ids: z.array(z.string()).catch([]),
         stats: z.looseObject({ additions: z.number().catch(0), deletions: z.number().catch(0) }).nullish().catch(null),
       });
@@ -2379,17 +2380,32 @@ export default async function plugin(bb: BbPluginApi) {
       // Only commits the viewer authored, on any branch; GitLab matches the
       // author filter against name and e-mail, which carry the username here.
       for (const entry of projects) {
-        for (let page = 1; ; page += 1) {
+        const name = entry.project.split("/").pop() ?? entry.project;
+        // With all=true some GitLab versions ignore `page` and return the same
+        // newest 100 commits every time, so walk back in time instead: each
+        // request asks for commits older than the oldest one seen so far.
+        let until: string | null = null;
+        for (let round = 0; ; round += 1) {
+          const window = until === null ? "" : `&until=${encodeURIComponent(until)}`;
           const rows = z.array(commitRow).catch([]).parse(
             await gitlabApi(
               entry.project,
-              `${projectApiBase(entry.project)}/repository/commits?all=true&with_stats=true&since=${encodeURIComponent(since)}&author=${encodeURIComponent(username)}&per_page=100&page=${page}`,
+              `${projectApiBase(entry.project)}/repository/commits?all=true&with_stats=true&since=${encodeURIComponent(since)}${window}&author=${encodeURIComponent(username)}&per_page=100`,
             ).catch(() => []),
           );
-          const name = entry.project.split("/").pop() ?? entry.project;
           commits.push(...rows.map((row) => ({ ...row, project: name })));
           if (rows.length < 100) break;
-          if (page >= 20) { complete = false; break; }
+          if (round >= 40) { complete = false; break; }
+          const oldest = rows.reduce((min, row) => {
+            const at = Date.parse(row.committed_date || row.authored_date);
+            return Number.isFinite(at) && at < min ? at : min;
+          }, Number.POSITIVE_INFINITY);
+          if (!Number.isFinite(oldest)) break;
+          // Step one second past the oldest so a page never repeats; ties at
+          // that exact second are rare and the SHA check drops duplicates.
+          const next = new Date(oldest - 1000).toISOString();
+          if (until !== null && next >= until) break;
+          until = next;
         }
       }
       const days = aggregateCommits(commits, startDate, endDate, (timestamp) => dateFormat.format(new Date(timestamp)));

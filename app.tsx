@@ -6948,7 +6948,7 @@ function ContributionSummary({
         <span>
           {error
             ? "Could not refresh; showing the last load."
-            : `Commits you authored, merges excluded, on any branch of ${data.projects} tracked project${data.projects === 1 ? "" : "s"} · ${data.host}${data.complete ? "" : " · capped at 2,000 per project"}`}
+            : `Commits you authored, merges excluded, on any branch of ${data.projects} tracked project${data.projects === 1 ? "" : "s"} · ${data.host}${data.complete ? "" : " · capped at 4,000 per project"}`}
         </span>
         <span className="flex items-center gap-1">Less {CONTRIBUTION_LEVELS.map((color, index) => <i key={index} className={cn("h-[9px] w-[9px] rounded-[2px]", color)} />)} More</span>
       </div>
