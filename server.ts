@@ -649,6 +649,19 @@ export const gitlabRpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.object({ mergeRequest: itemInputSchema.nullable() }).strict(),
   },
+  /**
+   * The checkout state of a thread's environment, read with git in its path,
+   * so the chat strip works without the bb--git plugin.
+   */
+  branchState: {
+    input: z.object({ environmentId: z.string().min(1) }).strict(),
+    output: z.object({
+      branch: z.string().nullable(),
+      headSha: z.string().nullable(),
+      dirty: z.boolean(),
+      aheadCount: z.number().int().nonnegative(),
+    }).strict(),
+  },
   workflowForBranch: {
     input: z.object({ projectId: z.string().min(1), branch: z.string().min(1) }).strict(),
     output: z.object({
@@ -2501,6 +2514,30 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(gitlabRpcContract, {
     async contributionCalendar({ host, timeZone }) {
       return await contributionCalendar(host, timeZone);
+    },
+    async branchState({ environmentId }) {
+      const environment = await bb.sdk.environments.get({ environmentId });
+      const path = environment.path;
+      if (!environment.isGitRepo || path === null || path === "") {
+        return { branch: null, headSha: null, dirty: false, aheadCount: 0 };
+      }
+      const git = async (...args: string[]) =>
+        (await run("git", ["-C", path, ...args], 10_000)).stdout.trim();
+      const [branch, headSha, status] = await Promise.all([
+        git("rev-parse", "--abbrev-ref", "HEAD"),
+        git("rev-parse", "HEAD").catch(() => ""),
+        git("status", "--porcelain"),
+      ]);
+      const base = environment.mergeBaseBranch ?? null;
+      const ahead = base === null
+        ? 0
+        : Number(await git("rev-list", "--count", `${base}..HEAD`).catch(() => "0")) || 0;
+      return {
+        branch: branch === "HEAD" || branch === "" ? null : branch,
+        headSha: headSha === "" ? null : headSha,
+        dirty: status.length > 0,
+        aheadCount: ahead,
+      };
     },
     async workflowForBranch({ projectId, branch }) {
       const project = (await discoverProjects()).find((row) => row.bbProjectId === projectId)?.project;

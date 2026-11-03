@@ -34,7 +34,6 @@ import {
   useRealtime,
   useRpc,
   useSdk,
-  experimental_useRpcKeyedQuery,
   type PluginHomepageSectionProps,
   type PluginNavPanelProps,
   type ExperimentalThreadTabProps,
@@ -7195,21 +7194,6 @@ function HomeDashboard({ projectId }: PluginHomepageSectionProps) {
   );
 }
 
-const gitStatusContract = {
-  status: {
-    input: z.object({ keys: z.array(z.string()) }),
-    output: z.record(z.string(), z.object({
-      outcome: z.string(),
-      workspace: z.object({
-        workingTree: z.object({ hasUncommittedChanges: z.boolean() }),
-        checkout: z.object({ headSha: z.string().nullable().optional() }),
-        branch: z.object({ currentBranch: z.string().nullable() }),
-        mergeBase: z.object({ aheadCount: z.number() }).nullable(),
-      }).optional(),
-    })),
-  },
-};
-
 function useGitlabWorkflowVisible({ projectId, environment }: ExperimentalThreadContextSegmentProps) {
   const rpc = useRpc<typeof gitlabRpcContract>();
   const [visible, setVisible] = useState(false);
@@ -7248,13 +7232,26 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const git = experimental_useRpcKeyedQuery({
-    pluginId: "bb--git", contract: gitStatusContract, method: "status",
-    keys: environment === null ? [] : [environment.id],
-  });
-  const workspace = environment === null ? undefined : git.data?.[environment.id]?.workspace;
-  const branch = workspace?.branch.currentBranch ?? null;
-  const localHead = workspace?.checkout.headSha ?? null;
+  // The checkout is read by this plugin's server with git, so the strip does
+  // not depend on the bb--git plugin being on.
+  const [local, setLocal] = useState<{ branch: string | null; headSha: string | null; dirty: boolean; aheadCount: number } | null>(null);
+  const [localError, setLocalError] = useState(false);
+  const environmentId = environment?.id ?? null;
+  useEffect(() => {
+    if (environmentId === null) { setLocal(null); return; }
+    let cancelled = false;
+    const refresh = () => {
+      rpc.call("branchState", { environmentId }).then(
+        (result) => { if (!cancelled) { setLocal(result); setLocalError(false); } },
+        () => { if (!cancelled) setLocalError(true); },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [rpc, environmentId, attempt]);
+  const branch = local?.branch ?? null;
+  const localHead = local?.headSha ?? null;
 
   useEffect(() => {
     if (branch === null) { setRemote(null); return; }
@@ -7283,16 +7280,17 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
       <span className="truncate">{text}</span>
     </span>
   );
-  if (error) {
-    return (
-      <span className="flex min-w-0 items-center gap-2.5 font-sans">
-        {branchChip}
-        {state("bg-red-500", "Can't reach GitLab · check VPN")}
-        <SecondaryButton onClick={() => { setError(false); setAttempt((value) => value + 1); }}>Retry</SecondaryButton>
-      </span>
-    );
+  const retry = <SecondaryButton onClick={() => { setError(false); setLocalError(false); setAttempt((value) => value + 1); }}>Retry</SecondaryButton>;
+  const row = (...children: React.ReactNode[]) => (
+    <span className="flex min-w-0 items-center gap-2.5 font-sans">{branchChip}{children}</span>
+  );
+  if (localError) return row(state("bg-red-500", "Can't read the checkout"), retry);
+  if (error) return row(state("bg-red-500", "Can't reach GitLab · check VPN"), retry);
+  if (local !== null && branch === null) return row(state("bg-stone-400", "No branch checked out"));
+  if (remote !== null && remote.branch === branch && remote.project === null) {
+    return row(state("bg-stone-400", "This project is not tracked in GitLab"));
   }
-  if (workspace === undefined || branch === null || remote?.branch !== branch || remote.project === null) {
+  if (local === null || branch === null || remote?.branch !== branch || remote.project === null) {
     return (
       <span className="flex min-w-0 items-center gap-2.5 font-sans">
         {branchChip}
@@ -7301,10 +7299,10 @@ function GitlabWorkflowAction({ threadId, projectId, environment }: Experimental
     );
   }
   const stage = workflowStage({
-    dirty: workspace.workingTree.hasUncommittedChanges,
+    dirty: local.dirty,
     localHead,
     remoteHead: remote.remoteHead,
-    aheadOfBase: workspace.mergeBase?.aheadCount ?? 0,
+    aheadOfBase: local.aheadCount,
     mergeRequestIid: remote.mergeRequestIid,
   });
   const labels = {
