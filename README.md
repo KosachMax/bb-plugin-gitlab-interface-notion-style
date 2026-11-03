@@ -21,10 +21,11 @@ Screenshots use invented demo data.
 
 ## Features
 
-- **Your commits above the dashboard.** A Week / Month / Year switch shows how
-  many commits you authored, lines added and removed, and active days. Week
-  shows the last seven days as tiles, Month a calendar of the last 30 days,
-  Year a 12-month heatmap; hover a day for its commits, lines and projects. Only commits whose author is you count (on any branch of
+- **Your commits above the dashboard.** A Month / Year switch shows how
+  many commits you authored, lines added and removed, and active days. Year
+  (the default) is a 12-month heatmap; Month is a calendar of the last 30 days
+  with commits per project and your best day, in the same space. Hover a day
+  for its commits, lines and projects. Only commits whose author is you count (on any branch of
   the tracked projects, each SHA once, merge commits skipped), so a rebase
   or a merge of other people's work does not inflate the numbers. Cached for 30 minutes.
 - **🦊 GitLab next action in a thread.** The context row checks local changes,
