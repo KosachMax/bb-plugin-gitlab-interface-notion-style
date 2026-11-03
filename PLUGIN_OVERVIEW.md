@@ -20,7 +20,7 @@ A failed pipeline opens on the last lines of the failing job's log, where the er
 
 ## Start the day with what waits for you
 
-The new-thread page gets a GitLab section: your merge requests that need action, the ones ready to merge, and review requests. A heatmap of your own commits switches between week, month and year. Hover a day to see its commits, lines added and removed, and projects.
+The new-thread page gets a GitLab section: your merge requests that need action, the ones ready to merge, and review requests. A heatmap of your own commits switches between the year and a month calendar with commits per project. Hover a day to see its commits, lines added and removed, and projects.
 
 ## Agents do the rest
 

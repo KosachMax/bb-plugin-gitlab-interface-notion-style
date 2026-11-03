@@ -6688,73 +6688,90 @@ function weekdayIndex(key: string): number {
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
 /**
- * Week and Month views: big day tiles instead of the year's tiny squares.
- * Week is the last seven days in a row; Month is a Monday-first calendar of
- * the last thirty days. Same colors and the same hover card as the year.
+ * The Month view: a Monday-first calendar of the last 30 days and, beside it,
+ * where those commits went by project. It is drawn over the year grid, which
+ * stays mounted but hidden, so the widget keeps the same size in both views.
  */
-function ContributionDays({ mode, startKey, endDate, days }: {
-  mode: "week" | "month";
+function ContributionMonth({ startKey, endDate, days }: {
   startKey: string;
   endDate: string;
   days: ContributionCalendarData["days"];
 }) {
   const byDate = useMemo(() => new Map(days.map((day) => [day.date, day])), [days]);
   const [hover, setHover] = useState<{ date: string; anchor: DOMRect } | null>(null);
-  const tile = (key: string, inPeriod: boolean, big: boolean) => {
-    if (!inPeriod) return <span key={key} aria-hidden="true" />;
-    const day = byDate.get(key);
-    const count = day?.count ?? 0;
-    const level = contributionLevel(count);
-    const date = new Date(`${key}T00:00:00Z`);
-    return (
-      <span
-        key={key}
-        aria-label={`${formatDayKey(key)}: ${count} commit${count === 1 ? "" : "s"}`}
-        onMouseEnter={(event) => setHover({ date: key, anchor: event.currentTarget.getBoundingClientRect() })}
-        className={cn(
-          "flex min-w-0 flex-col justify-between rounded-md px-2 py-1.5 transition-shadow",
-          big ? "h-[76px]" : "h-12",
-          CONTRIBUTION_LEVELS[level],
-          level >= 3 ? "text-white" : "text-foreground",
-          key === endDate && "ring-1 ring-[rgb(35,131,226)] ring-offset-1 ring-offset-background",
-          hover?.date === key && "outline outline-[1.5px] outline-offset-1 outline-foreground",
-        )}
+  const inPeriod = days.filter((day) => day.date >= startKey && day.date <= endDate);
+  const projects = new Map<string, number>();
+  for (const day of inPeriod) {
+    for (const entry of day.projects ?? []) projects.set(entry.name, (projects.get(entry.name) ?? 0) + entry.count);
+  }
+  const ranked = [...projects.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const top = ranked[0]?.[1] ?? 1;
+  const best = inPeriod.reduce<ContributionDayData | null>((winner, day) => (winner === null || day.count > winner.count ? day : winner), null);
+  const first = shiftDayKey(startKey, -weekdayIndex(startKey));
+  const last = shiftDayKey(endDate, 6 - weekdayIndex(endDate));
+  const keys = dayKeysBetween(first, last);
+  return (
+    <div className="flex h-full min-w-0 gap-5" onMouseLeave={() => setHover(null)}>
+      <div
+        className="grid shrink-0 gap-x-1 gap-y-[3px]"
+        style={{ gridTemplateColumns: "repeat(7, 44px)", gridTemplateRows: `14px repeat(${keys.length / 7}, minmax(0, 1fr))` }}
       >
-        <span className={cn("truncate text-xs", level >= 3 ? "text-white/80" : "text-muted-foreground")}>
-          {big
-            ? date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" })
-            : date.getUTCDate() === 1 || key === startKey
-              ? date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
-              : date.getUTCDate()}
-        </span>
-        {count > 0 ? (
-          <span className={cn("font-semibold tabular-nums", big ? "text-lg leading-6" : "text-sm leading-5")}>
-            {count}
-            {big ? <span className="pl-1 text-xs font-normal">commit{count === 1 ? "" : "s"}</span> : null}
+        {["M", "T", "W", "T", "F", "S", "S"].map((name, index) => (
+          <span key={index} className="text-center text-[10px] leading-[14px] text-muted-foreground">{name}</span>
+        ))}
+        {keys.map((key) => {
+          const inside = key >= startKey && key <= endDate;
+          const count = byDate.get(key)?.count ?? 0;
+          const level = inside ? contributionLevel(count) : 0;
+          const date = new Date(`${key}T00:00:00Z`);
+          const label = inside && (date.getUTCDate() === 1 || key === startKey)
+            ? date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
+            : String(date.getUTCDate());
+          return (
+            <span
+              key={key}
+              aria-label={inside ? `${formatDayKey(key)}: ${count} commit${count === 1 ? "" : "s"}` : undefined}
+              onMouseEnter={inside ? (event) => setHover({ date: key, anchor: event.currentTarget.getBoundingClientRect() }) : undefined}
+              className={cn(
+                "flex min-h-0 items-center justify-center rounded-[5px] text-[11px] tabular-nums",
+                !inside
+                  ? "text-muted-foreground/40"
+                  : cn(CONTRIBUTION_LEVELS[level], level >= 3 ? "font-medium text-white" : level >= 1 ? "text-foreground/80" : "text-muted-foreground"),
+                inside && key === endDate && "ring-[1.5px] ring-[rgb(35,131,226)]",
+                hover?.date === key && "outline outline-[1.5px] outline-offset-1 outline-foreground",
+              )}
+            >
+              {label.length > 2 ? <span className="text-[10px]">{label}</span> : label}
+            </span>
+          );
+        })}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-2 pt-[17px]">
+        {ranked.length > 0 ? (
+          <>
+            <span className="text-xs text-muted-foreground">By project</span>
+            {ranked.map(([name, count]) => (
+              <span key={name} className="grid min-w-0 grid-cols-[minmax(0,110px)_1fr_48px] items-center gap-2.5 text-[13px]">
+                <span className="truncate" title={name}>{name}</span>
+                <span className="h-2 overflow-hidden rounded-full bg-foreground/[0.07]">
+                  <span className="block h-full rounded-full bg-[#e56b35] [.dark_&]:bg-[#d45c2a]" style={{ width: `${(count / top) * 100}%` }} />
+                </span>
+                <span className="text-right font-semibold tabular-nums">{count}</span>
+              </span>
+            ))}
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">No commits in the last 30 days.</span>
+        )}
+        {best !== null && best.count > 0 ? (
+          <span className="flex items-center justify-between gap-2.5 border-t border-border/70 pt-2 text-[13px] text-muted-foreground">
+            Best day
+            <span className="font-medium text-foreground">
+              {new Date(`${best.date}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })} · {best.count}
+            </span>
           </span>
         ) : null}
-      </span>
-    );
-  };
-
-  let cells: React.ReactNode;
-  if (mode === "week") {
-    cells = <div className="grid grid-cols-7 gap-1.5">{dayKeysBetween(startKey, endDate).map((key) => tile(key, true, true))}</div>;
-  } else {
-    const first = shiftDayKey(startKey, -weekdayIndex(startKey));
-    const last = shiftDayKey(endDate, 6 - weekdayIndex(endDate));
-    cells = (
-      <div className="grid grid-cols-7 gap-1.5">
-        {WEEKDAYS.map((name) => (
-          <span key={name} className="px-2 text-xs text-muted-foreground">{name}</span>
-        ))}
-        {dayKeysBetween(first, last).map((key) => tile(key, key >= startKey && key <= endDate, false))}
       </div>
-    );
-  }
-  return (
-    <div className="min-w-0 max-w-[800px]" onMouseLeave={() => setHover(null)}>
-      {cells}
       {hover !== null ? <ContributionTooltip date={hover.date} day={byDate.get(hover.date)} anchor={hover.anchor} /> : null}
     </div>
   );
@@ -6868,7 +6885,6 @@ function ContributionCalendar({ host }: { host: string | null }) {
 }
 
 const CONTRIBUTION_PERIODS = [
-  { id: "week", label: "Week", days: 7 },
   { id: "month", label: "Month", days: 30 },
   { id: "year", label: "Year", days: 365 },
 ] as const;
@@ -6882,9 +6898,9 @@ function ContributionSummary({
   error: string | null;
   weeks: Array<Array<{ date: string; count: number; inRange: boolean }>>;
 }) {
-  const [period, setPeriod] = useSticky<(typeof CONTRIBUTION_PERIODS)[number]["id"]>("contribution-period", "week");
+  const [period, setPeriod] = useSticky<(typeof CONTRIBUTION_PERIODS)[number]["id"]>("contribution-period", "year");
   const number = new Intl.NumberFormat();
-  const chosen = CONTRIBUTION_PERIODS.find((entry) => entry.id === period) ?? CONTRIBUTION_PERIODS[0];
+  const chosen = CONTRIBUTION_PERIODS.find((entry) => entry.id === period) ?? CONTRIBUTION_PERIODS[1];
   const periodStart = new Date(`${data.endDate}T00:00:00Z`);
   periodStart.setUTCDate(periodStart.getUTCDate() - chosen.days + 1);
   const startKey = periodStart.toISOString().slice(0, 10);
@@ -6917,11 +6933,17 @@ function ContributionSummary({
           </div>
         ))}
       </div>
-      {chosen.id === "year" ? (
-        <ContributionGrid weeks={weeks} endDate={data.endDate} days={data.days} />
-      ) : (
-        <ContributionDays mode={chosen.id} startKey={startKey} endDate={data.endDate} days={data.days} />
-      )}
+      {/* The year grid always sets the size; Month draws over it, so switching never resizes the widget. */}
+      <div className="relative">
+        <div className={cn(chosen.id !== "year" && "invisible")} aria-hidden={chosen.id !== "year"}>
+          <ContributionGrid weeks={weeks} endDate={data.endDate} days={data.days} />
+        </div>
+        {chosen.id === "month" ? (
+          <div className="absolute inset-0">
+            <ContributionMonth startKey={startKey} endDate={data.endDate} days={data.days} />
+          </div>
+        ) : null}
+      </div>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>
           {error
